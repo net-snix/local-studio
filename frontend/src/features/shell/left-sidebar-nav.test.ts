@@ -15,6 +15,7 @@ describe("left sidebar navigation", () => {
       tabs.map((tab) => [tab.href, tab.label]),
       [
         ["/", "Status"],
+        ["/dashboard", "Dashboard"],
         ["/agent/automations", "Automations"],
         ["/configure", "Configure"],
         ["/usage", "Usage"],
@@ -30,6 +31,7 @@ describe("left sidebar navigation", () => {
   });
 
   test("uses destination titles on mobile", () => {
+    assert.equal(mobilePageTitle("/dashboard"), "Dashboard");
     assert.equal(mobilePageTitle("/agent/automations"), "Automations");
     assert.equal(mobilePageTitle("/agent/session-1"), "Tasks");
   });
