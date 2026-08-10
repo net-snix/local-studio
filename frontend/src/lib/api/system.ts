@@ -2,12 +2,18 @@ import type {
   CompatibilityReport,
   ConfigData,
   GPU,
+  LinuxDashboardSnapshot,
   Metrics,
   ProcessInfo,
   UsageStats,
   VRAMCalculation,
 } from "../types";
-import { encodePathSegments, type ApiCore, type RequestOptions } from "./core";
+import {
+  encodePathSegments,
+  type ApiCore,
+  type ChatRunStreamEvent,
+  type RequestOptions,
+} from "./core";
 
 const MB = 1024 * 1024;
 const GPU_BOOLEAN_KEYS = [
@@ -154,6 +160,28 @@ export function createSystemApi(core: ApiCore) {
     }> => core.request("/peak-metrics", { retries: 0 }),
 
     getUsageStats: (): Promise<UsageStats> => core.request("/usage", { retries: 0 }),
+
+    getLinuxDashboard: (options?: RequestOptions): Promise<LinuxDashboardSnapshot> =>
+      core.request("/linux-dashboard", options),
+
+    streamLinuxDashboard: (options?: {
+      signal?: AbortSignal;
+    }): Promise<AsyncGenerator<ChatRunStreamEvent>> =>
+      core.getSseJson("/linux-dashboard/stream", options),
+
+    restartHost: (): Promise<{ success: boolean; message: string }> =>
+      core.request("/linux-dashboard/restart", {
+        method: "POST",
+        timeout: 5_000,
+        retries: 0,
+      }),
+
+    shutdownHost: (): Promise<{ success: boolean; message: string }> =>
+      core.request("/linux-dashboard/shutdown", {
+        method: "POST",
+        timeout: 5_000,
+        retries: 0,
+      }),
 
     getStatus: async (
       options?: RequestOptions,
