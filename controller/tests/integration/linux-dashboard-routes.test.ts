@@ -26,6 +26,7 @@ describe("linux dashboard routes", () => {
     const app = makeApp();
     const context = {
       config: {
+        port: 8080,
         inference_port: 8000,
       },
       logger: {
@@ -67,6 +68,7 @@ describe("linux dashboard routes", () => {
     const app = makeApp();
     const context = {
       config: {
+        port: 8080,
         inference_port: 8000,
       },
       logger: {
