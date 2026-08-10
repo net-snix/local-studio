@@ -3,6 +3,7 @@ import {
   parseCpuEnergyHelperOutput,
   parseCpuInfoIdentity,
   parseCpuPowerSampleTtl,
+  parseDashboardServicePort,
   readCpuEnergyHelperSample,
 } from "./linux-dashboard-collector";
 import { parseDiskTargets } from "./linux-dashboard-disks";
@@ -106,6 +107,16 @@ describe("linux dashboard CPU power helper", () => {
       { command: process.execPath, args: [] },
       { command: "sudo", args: ["-n", process.execPath] },
     ]);
+  });
+});
+
+describe("linux dashboard service ports", () => {
+  it("accepts valid port overrides and rejects invalid values", () => {
+    expect(parseDashboardServicePort("4783", 3000)).toBe(4783);
+    expect(parseDashboardServicePort("0", 3000)).toBe(3000);
+    expect(parseDashboardServicePort("65536", 3000)).toBe(3000);
+    expect(parseDashboardServicePort("1.5", 3000)).toBe(3000);
+    expect(parseDashboardServicePort("invalid", 3000)).toBe(3000);
   });
 });
 

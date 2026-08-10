@@ -57,11 +57,12 @@ export const parseCpuPowerSampleTtl = (value: string | undefined, fallback: numb
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 const CPU_POWER_SAMPLE_TTL_MS = parseCpuPowerSampleTtl(
-  process.env["VLLM_STUDIO_CPU_POWER_SAMPLE_TTL_MS"],
+  process.env["LOCAL_STUDIO_DASHBOARD_CPU_POWER_SAMPLE_TTL_MS"],
   DEFAULT_CPU_POWER_SAMPLE_TTL_MS,
 );
 const CPU_ENERGY_HELPER =
-  process.env["VLLM_STUDIO_CPU_ENERGY_HELPER"] ?? "/usr/local/libexec/vllm-studio/read-cpu-energy";
+  process.env["LOCAL_STUDIO_DASHBOARD_CPU_ENERGY_HELPER"] ??
+  "/usr/local/libexec/local-studio/read-cpu-energy";
 
 type CpuSample = {
   idle: number;
@@ -505,8 +506,28 @@ const checkPort = (port: number, timeoutMs = 600): Effect.Effect<boolean> =>
 const checkSystemdService = (serviceName: string): boolean =>
   runDashboardCommand("systemctl", ["is-active", "--quiet", serviceName], 1_000).status === 0;
 
-const collectServices = (inferencePort: number): Effect.Effect<DashboardService[]> =>
+export const parseDashboardServicePort = (value: string | undefined, fallback: number): number => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65_535 ? parsed : fallback;
+};
+
+const collectServices = (
+  controllerPort: number,
+  inferencePort: number,
+): Effect.Effect<DashboardService[]> =>
   Effect.gen(function* () {
+    const frontendPort = parseDashboardServicePort(
+      process.env["LOCAL_STUDIO_DASHBOARD_FRONTEND_PORT"],
+      4783,
+    );
+    const agentRuntimePort = parseDashboardServicePort(
+      process.env["LOCAL_STUDIO_DASHBOARD_AGENT_RUNTIME_PORT"],
+      8081,
+    );
+    const searxngPort = parseDashboardServicePort(
+      process.env["LOCAL_STUDIO_DASHBOARD_SEARXNG_PORT"],
+      18_081,
+    );
     const portServices = [
       {
         id: "model",
@@ -517,10 +538,24 @@ const collectServices = (inferencePort: number): Effect.Effect<DashboardService[
       },
       {
         id: "studio",
-        name: "vLLM Studio",
-        port: 3000,
-        endpoint: ":3000",
+        name: "Local Studio",
+        port: frontendPort,
+        endpoint: `:${frontendPort}`,
         description: "remote frontend",
+      },
+      {
+        id: "controller",
+        name: "Controller",
+        port: controllerPort,
+        endpoint: `:${controllerPort}`,
+        description: "Local Studio controller API",
+      },
+      {
+        id: "agent-runtime",
+        name: "Agent Runtime",
+        port: agentRuntimePort,
+        endpoint: `:${agentRuntimePort}`,
+        description: "Pi coding agent runtime",
       },
       {
         id: "grafana",
@@ -539,8 +574,8 @@ const collectServices = (inferencePort: number): Effect.Effect<DashboardService[
       {
         id: "searxng",
         name: "SearXNG",
-        port: 8081,
-        endpoint: ":8081",
+        port: searxngPort,
+        endpoint: `:${searxngPort}`,
         description: "private search",
       },
       {
@@ -628,7 +663,7 @@ const collectSlowSnapshot = (context: AppContext): Effect.Effect<SlowSnapshot> =
     }
 
     const [services, disks] = yield* Effect.all(
-      [collectServices(context.config.inference_port), Effect.sync(collectDisks)],
+      [collectServices(context.config.port, context.config.inference_port), Effect.sync(collectDisks)],
       { concurrency: "unbounded" },
     );
     const { fans, thermals } = readHwmon();
