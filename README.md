@@ -162,6 +162,18 @@ Recipes launch through the controller runtime layer. Wired backend families:
 Runtime target discovery, models, integrations, and server controls are
 surfaced in Configure; selections persist in the controller data directory.
 
+## Linux host dashboard
+
+The Dashboard tab at `/dashboard` shows live telemetry for the controller host:
+CPU, memory, NVIDIA GPUs, disks, sensors, local services, inference backends,
+and Docker containers. It reads `GET /linux-dashboard` and the shared
+`GET /linux-dashboard/stream` SSE feed through the normal frontend proxy.
+
+Set `VLLM_STUDIO_DASHBOARD_DISKS` to a comma-separated list of `label:/path`
+entries to monitor additional mounts. Restart and shutdown controls require
+passwordless `sudo` for the controller service user and fail without scheduling
+the power action when that permission is unavailable.
+
 ## Production
 
 Build the frontend, then serve the controller and standalone frontend in separate
