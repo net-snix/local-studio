@@ -475,3 +475,269 @@ const readHwmon = (): { fans: DashboardFan[]; thermals: DashboardThermal[] } => 
     thermals: thermals.slice(0, 32),
   };
 };
+
+const checkPort = (port: number, timeoutMs = 600): Effect.Effect<boolean> =>
+  Effect.callback<boolean>((resume) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    let settled = false;
+    const cleanup = (): void => {
+      socket.removeListener("connect", onConnect);
+      socket.removeListener("timeout", onTimeout);
+      socket.removeListener("error", onError);
+      socket.destroy();
+    };
+    const done = (result: boolean): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resume(Effect.succeed(result));
+    };
+    const onConnect = (): void => done(true);
+    const onTimeout = (): void => done(false);
+    const onError = (): void => done(false);
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", onConnect);
+    socket.once("timeout", onTimeout);
+    socket.once("error", onError);
+    return Effect.sync(cleanup);
+  });
+
+const checkSystemdService = (serviceName: string): boolean =>
+  runDashboardCommand("systemctl", ["is-active", "--quiet", serviceName], 1_000).status === 0;
+
+const collectServices = (inferencePort: number): Effect.Effect<DashboardService[]> =>
+  Effect.gen(function* () {
+    const portServices = [
+      {
+        id: "model",
+        name: "Model API",
+        port: inferencePort,
+        endpoint: `:${inferencePort}`,
+        description: "active inference endpoint",
+      },
+      {
+        id: "studio",
+        name: "vLLM Studio",
+        port: 3000,
+        endpoint: ":3000",
+        description: "remote frontend",
+      },
+      {
+        id: "grafana",
+        name: "Grafana",
+        port: 3030,
+        endpoint: ":3030",
+        description: "monitoring UI",
+      },
+      {
+        id: "prometheus",
+        name: "Prometheus",
+        port: 9090,
+        endpoint: ":9090",
+        description: "metrics store",
+      },
+      {
+        id: "searxng",
+        name: "SearXNG",
+        port: 8081,
+        endpoint: ":8081",
+        description: "private search",
+      },
+      {
+        id: "infisical",
+        name: "Infisical",
+        port: 8082,
+        endpoint: ":8082",
+        description: "secrets UI",
+      },
+    ];
+
+    const checks = yield* Effect.all(
+      portServices.map((service) => checkPort(service.port)),
+      { concurrency: "unbounded" },
+    );
+    const services: DashboardService[] = portServices.map((service, index) => ({
+      id: service.id,
+      name: service.name,
+      endpoint: service.endpoint,
+      description: service.description,
+      status: checks[index] ? "running" : "stopped",
+    }));
+
+    services.push({
+      id: "lact",
+      name: "LACT",
+      endpoint: "socket",
+      description: "GPU control daemon",
+      status: checkSystemdService("lactd.service") ? "running" : "stopped",
+    });
+
+    return services;
+  });
+
+const collectContainers = (): { containers: DashboardContainer[]; docker_error: string | null } => {
+  const result = runDashboardCommand("docker", ["ps", "--format", "{{json .}}"], 2_000);
+  if (result.status !== 0) {
+    return {
+      containers: [],
+      docker_error: result.stderr || "docker ps failed",
+    };
+  }
+
+  const containers = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line): DashboardContainer[] => {
+      try {
+        const value = JSON.parse(line) as Record<string, string>;
+        return [
+          {
+            id: value["ID"] ?? "",
+            name: value["Names"] ?? "",
+            image: value["Image"] ?? "",
+            status: value["Status"] ?? "",
+            state: value["State"] ?? "",
+            ports: value["Ports"] ?? "",
+          },
+        ];
+      } catch {
+        return [];
+      }
+    });
+
+  return { containers, docker_error: null };
+};
+
+type SlowSnapshot = {
+  disks: LinuxDashboardSnapshot["disks"];
+  fans: DashboardFan[];
+  thermals: DashboardThermal[];
+  services: DashboardService[];
+  containers: DashboardContainer[];
+  docker_error: string | null;
+};
+
+let slowSnapshotCache: { value: SlowSnapshot; collectedAt: number } | null = null;
+
+const collectSlowSnapshot = (context: AppContext): Effect.Effect<SlowSnapshot> =>
+  Effect.gen(function* () {
+    const now = Date.now();
+    if (slowSnapshotCache && now - slowSnapshotCache.collectedAt < SLOW_SNAPSHOT_TTL_MS) {
+      return slowSnapshotCache.value;
+    }
+
+    const [services, disks] = yield* Effect.all(
+      [collectServices(context.config.inference_port), Effect.sync(collectDisks)],
+      { concurrency: "unbounded" },
+    );
+    const { fans, thermals } = readHwmon();
+    const { containers, docker_error } = collectContainers();
+    const value = {
+      disks,
+      fans,
+      thermals,
+      services,
+      containers,
+      docker_error,
+    };
+    slowSnapshotCache = { value, collectedAt: Date.now() };
+    return value;
+  });
+
+const buildAlerts = (snapshot: Omit<LinuxDashboardSnapshot, "alerts">): DashboardAlert[] => {
+  const alerts: DashboardAlert[] = [];
+  const push = (severity: LinuxDashboardAlertSeverity, source: string, message: string): void => {
+    alerts.push({ severity, source, message });
+  };
+
+  if (snapshot.host.platform !== "linux") {
+    push(
+      "info",
+      "host",
+      `Dashboard is reading ${snapshot.host.platform}; Linux-only sensors are unavailable`,
+    );
+  }
+
+  for (const disk of snapshot.disks) {
+    if (!disk.mounted && snapshot.host.platform === "linux") {
+      push("critical", disk.path, `${disk.path} is missing`);
+      continue;
+    }
+    if (disk.status === "critical") {
+      push("critical", disk.path, `${disk.path} free space is critically low`);
+    } else if (disk.status === "warning") {
+      push("warning", disk.path, `${disk.path} free space is getting low`);
+    }
+  }
+
+  if (snapshot.memory.used_percent >= 92) {
+    push("critical", "memory", "memory usage is above 92%");
+  } else if (snapshot.memory.used_percent >= 85) {
+    push("warning", "memory", "memory usage is above 85%");
+  }
+
+  for (const gpu of snapshot.gpus) {
+    if ((gpu.temperature_c ?? 0) >= 88) {
+      push("critical", `gpu${gpu.index}`, `${gpu.name} is above 88 C`);
+    } else if ((gpu.temperature_c ?? 0) >= 82) {
+      push("warning", `gpu${gpu.index}`, `${gpu.name} is above 82 C`);
+    }
+  }
+
+  if (snapshot.gpus.length === 0 && snapshot.host.platform === "linux") {
+    push("warning", "gpu", "no GPU telemetry available");
+  }
+  if (snapshot.fans.length === 0 && snapshot.host.platform === "linux") {
+    push("info", "fans", "fan RPM is not exposed by hwmon");
+  }
+
+  return alerts;
+};
+
+export const collectLinuxDashboardSnapshot = (
+  context: AppContext,
+): Effect.Effect<LinuxDashboardSnapshot> =>
+  Effect.gen(function* () {
+    const [cpu, slowSnapshot, gpus] = yield* Effect.all(
+      [collectCpu(), collectSlowSnapshot(context), collectGpus()],
+      { concurrency: "unbounded" },
+    );
+    const cpuIdentity = collectCpuIdentity();
+    const hostLoad = loadavg();
+
+    const snapshotWithoutAlerts = {
+      collected_at: new Date().toISOString(),
+      host: {
+        hostname: hostname(),
+        platform: platform(),
+        kernel: release(),
+        arch: arch(),
+        uptime_seconds: Math.floor(uptime()),
+        load_average: [
+          roundOne(hostLoad[0] ?? 0),
+          roundOne(hostLoad[1] ?? 0),
+          roundOne(hostLoad[2] ?? 0),
+        ] as [number, number, number],
+        cpu_cores: cpu.cores,
+        cpu_model: cpuIdentity.model,
+        cpu_physical_cores: cpuIdentity.physicalCores,
+        cpu_threads: cpuIdentity.threads,
+        target: "controller-host" as const,
+      },
+      cpu,
+      memory: parseMemInfo(),
+      gpus,
+      disks: slowSnapshot.disks,
+      fans: slowSnapshot.fans,
+      thermals: slowSnapshot.thermals,
+      services: slowSnapshot.services,
+      containers: slowSnapshot.containers,
+      docker_error: slowSnapshot.docker_error,
+    };
+
+    return {
+      ...snapshotWithoutAlerts,
+      alerts: buildAlerts(snapshotWithoutAlerts),
+    };
+  });
