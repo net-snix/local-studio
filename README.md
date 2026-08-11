@@ -168,6 +168,11 @@ The Dashboard tab at `/dashboard` shows live telemetry for the controller host:
 CPU, memory, NVIDIA GPUs, disks, sensors, local services, inference backends,
 and Docker containers. It reads `GET /linux-dashboard` and the shared
 `GET /linux-dashboard/stream` SSE feed through the normal frontend proxy.
+Telemetry graphs keep the latest five observed minutes, pause while the page is
+inactive, and render a break instead of connecting samples across a pause. The
+runtime strip also observes a healthy configured inference endpoint when it was
+started outside Local Studio; lifecycle controls remain limited to models owned
+by Local Studio.
 
 Set `LOCAL_STUDIO_DASHBOARD_DISKS` to a comma-separated list of `label:/path`
 entries to monitor additional mounts. Service probes default to the production
