@@ -15,6 +15,7 @@ export type DashboardHistoryGpu = {
 export type DashboardHistoryPoint = {
   collected_at: string;
   time: number;
+  break_before?: boolean;
   cpu_usage_percent: number | null;
   cpu_load_percent: number | null;
   cpu_power_draw_watts: number | null;
@@ -23,12 +24,15 @@ export type DashboardHistoryPoint = {
 };
 
 const DASHBOARD_HISTORY_WINDOW_MS = 5 * 60 * 1000;
+const DASHBOARD_SAMPLE_INTERVAL_MS = 1000;
+const DASHBOARD_GAP_THRESHOLD_MS = 3000;
 const DEFAULT_HISTORY_LIMIT = 900;
 const DASHBOARD_HISTORY_STORAGE_KEY = "vllm-studio-dashboard-history";
 
 export type DashboardUsageSample = {
   time: number;
   value: number | null;
+  break_before?: boolean;
 };
 
 const isFiniteNumber = (value: unknown): value is number =>
@@ -58,7 +62,9 @@ const isHistoryPoint = (value: unknown): value is DashboardHistoryPoint => {
   const point = value as Partial<DashboardHistoryPoint>;
   return (
     typeof point.collected_at === "string" &&
+    Number.isFinite(Date.parse(point.collected_at)) &&
     isFiniteNumber(point.time) &&
+    (point.break_before === undefined || typeof point.break_before === "boolean") &&
     isNullableFiniteNumber(point.cpu_usage_percent) &&
     isNullableFiniteNumber(point.cpu_load_percent) &&
     isNullableFiniteNumber(point.cpu_power_draw_watts) &&
@@ -76,9 +82,12 @@ const finiteOrNull = (value: number | null | undefined): number | null =>
 
 export const snapshotToHistoryPoint = (
   snapshot: LinuxDashboardSnapshot,
+  time = Date.parse(snapshot.collected_at),
+  breakBefore = false,
 ): DashboardHistoryPoint => ({
   collected_at: snapshot.collected_at,
-  time: Date.parse(snapshot.collected_at),
+  time,
+  ...(breakBefore ? { break_before: true } : {}),
   cpu_usage_percent: finiteOrNull(snapshot.cpu.usage_percent),
   cpu_load_percent: finiteOrNull(snapshot.cpu.load_percent_1m),
   cpu_power_draw_watts: finiteOrNull(snapshot.cpu.power_draw_watts),
@@ -102,9 +111,17 @@ export const appendDashboardHistory = (
   limit = DEFAULT_HISTORY_LIMIT,
 ): DashboardHistoryPoint[] => {
   const last = history.at(-1);
-  if (last?.collected_at === snapshot.collected_at) return history;
+  const collectedAt = Date.parse(snapshot.collected_at);
+  const lastCollectedAt = last ? Date.parse(last.collected_at) : null;
+  if (!Number.isFinite(collectedAt)) return history;
+  if (lastCollectedAt !== null && collectedAt <= lastCollectedAt) return history;
 
-  const next = snapshotToHistoryPoint(snapshot);
+  const elapsed = lastCollectedAt === null ? 0 : collectedAt - lastCollectedAt;
+  const breakBefore = last !== undefined && elapsed > DASHBOARD_GAP_THRESHOLD_MS;
+  const time = last
+    ? last.time + (breakBefore ? DASHBOARD_SAMPLE_INTERVAL_MS : Math.max(elapsed, 1))
+    : collectedAt;
+  const next = snapshotToHistoryPoint(snapshot, time, breakBefore);
   const earliest = next.time - DASHBOARD_HISTORY_WINDOW_MS;
   return [...history, next].filter((point) => point.time >= earliest).slice(-limit);
 };
@@ -145,6 +162,14 @@ export const getCpuUsageSamples = (history: DashboardHistoryPoint[]): DashboardU
   history.map((point) => ({
     time: point.time,
     value: point.cpu_usage_percent ?? point.cpu_load_percent,
+    ...(point.break_before ? { break_before: true } : {}),
+  }));
+
+export const getMemoryUsageSamples = (history: DashboardHistoryPoint[]): DashboardUsageSample[] =>
+  history.map((point) => ({
+    time: point.time,
+    value: point.memory_used_percent,
+    ...(point.break_before ? { break_before: true } : {}),
   }));
 
 export const getGpuUsageSeries = (
@@ -172,6 +197,7 @@ export const getGpuUsageSamples = (
     return {
       time: point.time,
       value: sample?.utilization_percent ?? null,
+      ...(point.break_before ? { break_before: true } : {}),
     };
   });
 };
@@ -185,6 +211,7 @@ export const getGpuMemoryUsageSamples = (
     return {
       time: point.time,
       value: totalBytes > 0 ? (usedBytes / totalBytes) * 100 : null,
+      ...(point.break_before ? { break_before: true } : {}),
     };
   });
 
@@ -205,5 +232,6 @@ export const getSystemPowerSamples = (history: DashboardHistoryPoint[]): Dashboa
     return {
       time: point.time,
       value: totalPower > 0 ? totalPower : null,
+      ...(point.break_before ? { break_before: true } : {}),
     };
   });
