@@ -70,7 +70,7 @@ export function DashboardModelRuntime({
 
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
           {controls}
-          <HeaderStopButton running={runtime.running} />
+          <HeaderStopButton running={runtime.controllable} />
           <ModelsDropdown
             recipes={statusData.recipes}
             currentRecipeId={statusData.currentRecipe?.id}
@@ -83,7 +83,7 @@ export function DashboardModelRuntime({
           <RuntimeButton
             label={statusData.benchmarking ? "Run" : "Bench"}
             onClick={statusData.onBenchmark}
-            disabled={!runtime.running || statusData.benchmarking}
+            disabled={!runtime.controllable || statusData.benchmarking}
           />
           {trailingControls}
         </div>

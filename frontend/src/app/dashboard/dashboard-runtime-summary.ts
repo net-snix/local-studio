@@ -6,11 +6,15 @@ export function buildRuntimeSummary(statusData: DashboardLayoutProps) {
   const metrics = statusData.metrics;
   const currentProcess = statusData.currentProcess;
   const currentRecipe = statusData.currentRecipe;
-  const running = Boolean(currentProcess);
+  const controllable = Boolean(currentProcess);
+  const active = controllable || hasMetricIdentity(metrics);
   const modelName =
     currentRecipe?.name ||
     currentProcess?.served_model_name ||
     currentProcess?.model_path?.split("/").pop() ||
+    metrics?.served_model_name ||
+    metrics?.model_id ||
+    metrics?.model_path?.split("/").pop() ||
     "No model loaded";
 
   const fallbackPower = sumPositive(statusData.gpus.map((gpu) => gpu.power_draw));
@@ -56,7 +60,8 @@ export function buildRuntimeSummary(statusData: DashboardLayoutProps) {
   const peakRequests = normalizeCount(metrics?.session_peak_running_requests) || runningRequests;
 
   return {
-    running,
+    active,
+    controllable,
     modelName,
     backend: currentProcess?.backend ?? currentRecipe?.backend ?? null,
     platform: statusData.platformKind,
@@ -75,6 +80,10 @@ export function buildRuntimeSummary(statusData: DashboardLayoutProps) {
     completionTokens: tokenMetric(metrics?.generation_tokens_total),
     duration: durationMetric(metrics?.latency_avg),
   };
+}
+
+function hasMetricIdentity(metrics: DashboardLayoutProps["metrics"]): boolean {
+  return Boolean(metrics?.served_model_name || metrics?.model_id || metrics?.model_path);
 }
 
 function firstPositive(...values: Array<number | null | undefined>): number | null {
