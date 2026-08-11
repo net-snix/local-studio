@@ -3,12 +3,14 @@ import { Effect, Schedule } from "effect";
 import { getGpuInfo } from "./platform/gpu";
 import { getSystemRuntimeInfo } from "../engines/runtimes/runtime-info";
 import type { UsageAggregate } from "../../stores/inference-request-store";
+import { scrapeEngineMetrics } from "./engine-metrics-scrape";
 import {
-  SGLANG_METRIC_NAMES,
-  LLAMACPP_METRIC_NAMES,
-  VLLM_METRIC_NAMES,
-  scrapeEngineMetrics,
-} from "./engine-metrics-scrape";
+  counterRatePerSecond,
+  cumulativeTtftMs,
+  intervalTtftMs,
+  metricNamesForBackend,
+  observeEngineMetrics,
+} from "./engine-metrics-observation";
 import {
   bumpBestLower,
   bumpPeak,
@@ -24,22 +26,12 @@ const METRICS_COLLECT_INTERVAL_MS = 5_000;
 const METRICS_LIFETIME_UPTIME_INCREMENT_SECONDS = 5;
 
 export const startMetricsCollector = (context: AppContext): Effect.Effect<never> => {
-  let lastVllmMetrics: Record<string, number> = {};
+  let lastEngineMetrics: Record<string, number> = {};
   let lastMetricsTime = 0;
   let lastRuntimeSummaryAt = 0;
   let sessionModelId: string | null = null;
   let sessionPeakId: string | null = null;
   let sessionPeaks: SessionPeaks = emptyPeaks();
-  let metricsUnavailableUntil = 0;
-
-  const scrapeVllmMetrics = (port: number): Effect.Effect<Record<string, number>> =>
-    Effect.gen(function* () {
-      if (Date.now() < metricsUnavailableUntil) return {};
-      const scrape = yield* scrapeEngineMetrics(port, METRICS_HTTP_TIMEOUT_MS);
-      if (scrape.status === 404) metricsUnavailableUntil = Date.now() + 60_000;
-      else if (scrape.status === 200) metricsUnavailableUntil = 0;
-      return scrape.metrics;
-    });
 
   const collect = Effect.gen(function* () {
     const current = yield* context.bridge.findInferenceProcess();
@@ -114,16 +106,22 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
     const totalVramUsedGb = gpuList.reduce((sum, gpu) => sum + gpu.memory_used_mb / 1024, 0);
     const totalVramCapacityGb = gpuList.reduce((sum, gpu) => sum + gpu.memory_total_mb / 1024, 0);
     const totalPowerLimitWatts = gpuList.reduce((sum, gpu) => sum + gpu.power_limit, 0);
+    const engineScrape = yield* scrapeEngineMetrics(
+      context.config.inference_port,
+      METRICS_HTTP_TIMEOUT_MS,
+    );
+    const observation = observeEngineMetrics(current, engineScrape);
 
-    if (current) {
-      const modelId =
-        current.served_model_name ?? current.model_path?.split("/").pop() ?? "unknown";
+    if (observation) {
+      const modelId = observation.modelId;
+      const sessionModelKey = `${observation.backend}:${modelId}`;
 
-      if (sessionModelId !== modelId) {
-        sessionModelId = modelId;
+      if (sessionModelId !== sessionModelKey) {
+        sessionModelId = sessionModelKey;
         sessionPeakId = `${modelId}:${Date.now()}`;
         sessionPeaks = emptyPeaks();
-        metricsUnavailableUntil = 0;
+        lastEngineMetrics = {};
+        lastMetricsTime = 0;
       }
 
       let promptThroughput = 0;
@@ -134,77 +132,66 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
       let promptTokensTotal = 0;
       let generationTokensTotal = 0;
       let avgTtftMs = 0;
+      let intervalTtft = 0;
 
-      if (
-        current.backend === "vllm" ||
-        current.backend === "sglang" ||
-        current.backend === "llamacpp"
-      ) {
-        const vllmMetrics = yield* scrapeVllmMetrics(context.config.inference_port);
+      if (observation.metricsBackend) {
+        const engineMetrics = engineScrape.metrics;
         const now = Date.now() / 1000;
         const elapsed =
           lastMetricsTime > 0 ? now - lastMetricsTime : METRICS_LIFETIME_UPTIME_INCREMENT_SECONDS;
-        const names =
-          current.backend === "sglang"
-            ? SGLANG_METRIC_NAMES
-            : current.backend === "llamacpp"
-              ? LLAMACPP_METRIC_NAMES
-              : VLLM_METRIC_NAMES;
+        const names = metricNamesForBackend(observation.metricsBackend);
         if (
           elapsed > 0 &&
-          Object.keys(vllmMetrics).length > 0 &&
-          Object.keys(lastVllmMetrics).length > 0
+          Object.keys(engineMetrics).length > 0 &&
+          Object.keys(lastEngineMetrics).length > 0
         ) {
-          const previousPromptTokens = firstMetric(lastVllmMetrics, names.promptTokens);
-          const currentPromptTokens = firstMetric(vllmMetrics, names.promptTokens);
-          const previousGenerationTokens = firstMetric(lastVllmMetrics, names.generationTokens);
-          const currentGenerationTokens = firstMetric(vllmMetrics, names.generationTokens);
-          if (currentPromptTokens > previousPromptTokens) {
-            promptThroughput = (currentPromptTokens - previousPromptTokens) / elapsed;
-          }
-          if (currentGenerationTokens > previousGenerationTokens) {
-            generationThroughput = (currentGenerationTokens - previousGenerationTokens) / elapsed;
-          }
+          const previousPromptTokens = firstMetric(lastEngineMetrics, names.promptTokens);
+          const currentPromptTokens = firstMetric(engineMetrics, names.promptTokens);
+          const previousGenerationTokens = firstMetric(lastEngineMetrics, names.generationTokens);
+          const currentGenerationTokens = firstMetric(engineMetrics, names.generationTokens);
+          promptThroughput = counterRatePerSecond(
+            currentPromptTokens,
+            previousPromptTokens,
+            elapsed,
+          );
+          generationThroughput = counterRatePerSecond(
+            currentGenerationTokens,
+            previousGenerationTokens,
+            elapsed,
+          );
         }
 
-        promptThroughput = firstMetric(vllmMetrics, names.promptThroughput) || promptThroughput;
+        promptThroughput = firstMetric(engineMetrics, names.promptThroughput) || promptThroughput;
         generationThroughput =
-          firstMetric(vllmMetrics, names.generationThroughput) || generationThroughput;
+          firstMetric(engineMetrics, names.generationThroughput) || generationThroughput;
 
-        runningRequests = firstMetric(vllmMetrics, names.runningRequests);
-        pendingRequests = firstMetric(vllmMetrics, names.pendingRequests);
-        kvCacheUsage = firstMetric(vllmMetrics, names.kvCacheUsage);
-        promptTokensTotal = firstMetric(vllmMetrics, names.promptTokens);
-        generationTokensTotal = firstMetric(vllmMetrics, names.generationTokens);
+        runningRequests = firstMetric(engineMetrics, names.runningRequests);
+        pendingRequests = firstMetric(engineMetrics, names.pendingRequests);
+        kvCacheUsage = firstMetric(engineMetrics, names.kvCacheUsage);
+        promptTokensTotal = firstMetric(engineMetrics, names.promptTokens);
+        generationTokensTotal = firstMetric(engineMetrics, names.generationTokens);
+        avgTtftMs = cumulativeTtftMs(engineMetrics, names);
+        intervalTtft = intervalTtftMs(engineMetrics, lastEngineMetrics, names);
 
-        const previousTtftSum = lastVllmMetrics[names.ttftSum] ?? 0;
-        const previousTtftCount = lastVllmMetrics[names.ttftCount] ?? 0;
-        const currentTtftSum = vllmMetrics[names.ttftSum] ?? 0;
-        const currentTtftCount = vllmMetrics[names.ttftCount] ?? 0;
-        const dTtftCount = currentTtftCount - previousTtftCount;
-        if (dTtftCount > 0) {
-          avgTtftMs = ((currentTtftSum - previousTtftSum) / dTtftCount) * 1000;
-        }
-
-        lastVllmMetrics = vllmMetrics;
+        lastEngineMetrics = engineMetrics;
         lastMetricsTime = now;
 
-        if (promptThroughput > 0 || generationThroughput > 0 || avgTtftMs > 0) {
+        if (promptThroughput > 0 || generationThroughput > 0 || intervalTtft > 0) {
           yield* context.stores.peakMetricsStore.updateIfBetterEffect(
             modelId,
             promptThroughput > 0 ? promptThroughput : undefined,
             generationThroughput > 0 ? generationThroughput : undefined,
-            avgTtftMs > 0 ? avgTtftMs : undefined,
+            intervalTtft > 0 ? intervalTtft : undefined,
           );
         }
       } else {
-        lastVllmMetrics = {};
+        lastEngineMetrics = {};
         lastMetricsTime = 0;
       }
 
       bumpPeak(sessionPeaks, "prompt_throughput", promptThroughput);
       bumpPeak(sessionPeaks, "generation_throughput", generationThroughput);
-      bumpBestLower(sessionPeaks, "ttft_ms", avgTtftMs);
+      bumpBestLower(sessionPeaks, "ttft_ms", intervalTtft);
       bumpPeak(sessionPeaks, "kv_cache_usage", kvCacheUsage);
       bumpPeak(sessionPeaks, "running_requests", runningRequests);
       bumpPeak(sessionPeaks, "power_watts", totalPowerWatts);
@@ -241,8 +228,8 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
       yield* context.eventManager.publishMetrics({
         ...baseMetrics,
         model_id: modelId,
-        model_path: current.model_path ?? null,
-        served_model_name: current.served_model_name ?? null,
+        model_path: observation.modelPath,
+        served_model_name: observation.servedModelName,
         running_requests: runningRequests,
         pending_requests: pendingRequests,
         kv_cache_usage: kvCacheUsage,
@@ -281,6 +268,8 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
       sessionModelId = null;
       sessionPeakId = null;
       sessionPeaks = emptyPeaks();
+      lastEngineMetrics = {};
+      lastMetricsTime = 0;
       bumpPeak(sessionPeaks, "power_watts", totalPowerWatts);
       bumpPeak(sessionPeaks, "vram_used_gb", totalVramUsedGb);
       yield* context.eventManager.publishMetrics({

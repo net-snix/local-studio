@@ -8,11 +8,13 @@ import type { AppContext } from "../../app-context";
 import { getGpuInfo } from "./platform/gpu";
 import { fetchInference } from "../../http/local-fetch";
 import type { UsageAggregate } from "../../stores/inference-request-store";
+import { scrapeEngineMetrics } from "./engine-metrics-scrape";
 import {
-  SGLANG_METRIC_NAMES,
-  VLLM_METRIC_NAMES,
-  scrapeEngineMetrics,
-} from "./engine-metrics-scrape";
+  counterRatePerSecond,
+  cumulativeTtftMs,
+  metricNamesForBackend,
+  observeEngineMetrics,
+} from "./engine-metrics-observation";
 import { firstMetric, positiveOrUndefined } from "./metrics-peaks";
 
 const throughputSamples = new Map<
@@ -69,9 +71,9 @@ const buildCurrentMetrics = (
     };
 
     const scrape = yield* scrapeEngineMetrics(context.config.inference_port, 1500);
-    const engineActive = scrape.hasVllm || scrape.hasSglang || scrape.hasLlamacpp;
+    const observation = observeEngineMetrics(current, scrape);
 
-    if (!current && !engineActive) {
+    if (!observation) {
       return {
         ...baseMetrics,
         model_id: null,
@@ -80,36 +82,38 @@ const buildCurrentMetrics = (
       };
     }
 
-    const isSglang = current?.backend === "sglang" || (!current && scrape.hasSglang);
-    const modelId =
-      current?.served_model_name ??
-      current?.model_path?.split("/").pop() ??
-      scrape.modelName ??
-      "active";
+    const modelId = observation.modelId;
     const prometheus = scrape.metrics;
-    const names = isSglang ? SGLANG_METRIC_NAMES : VLLM_METRIC_NAMES;
+    const names = metricNamesForBackend(observation.metricsBackend ?? "vllm");
     const usageAggregate: UsageAggregate | null =
       yield* context.stores.inferenceRequestStore.aggregateEffect(
-        buildModelKeys(modelId, current?.model_path),
+        buildModelKeys(modelId, observation.modelPath),
       );
     const usageTotals = usageAggregate?.totals;
     const promptTokensTotal = firstMetric(prometheus, names.promptTokens);
     const generationTokensTotal = firstMetric(prometheus, names.generationTokens);
 
-    let promptThroughput = isSglang ? firstMetric(prometheus, names.promptThroughput) : 0;
-    let generationThroughput = isSglang ? firstMetric(prometheus, names.generationThroughput) : 0;
-    if (!isSglang) {
+    const hasDirectThroughput = observation.metricsBackend !== "vllm";
+    let promptThroughput = hasDirectThroughput
+      ? firstMetric(prometheus, names.promptThroughput)
+      : 0;
+    let generationThroughput = hasDirectThroughput
+      ? firstMetric(prometheus, names.generationThroughput)
+      : 0;
+    if (observation.metricsBackend === "vllm") {
       const nowMs = Date.now();
       const previous = throughputSamples.get(modelId);
       if (previous && nowMs - previous.ts >= MIN_RATE_INTERVAL_MS) {
         const elapsedSeconds = (nowMs - previous.ts) / 1000;
-        promptThroughput = Math.max(
-          0,
-          (promptTokensTotal - previous.promptTokens) / elapsedSeconds,
+        promptThroughput = counterRatePerSecond(
+          promptTokensTotal,
+          previous.promptTokens,
+          elapsedSeconds,
         );
-        generationThroughput = Math.max(
-          0,
-          (generationTokensTotal - previous.genTokens) / elapsedSeconds,
+        generationThroughput = counterRatePerSecond(
+          generationTokensTotal,
+          previous.genTokens,
+          elapsedSeconds,
         );
         throughputSamples.set(modelId, {
           promptTokens: promptTokensTotal,
@@ -131,8 +135,7 @@ const buildCurrentMetrics = (
         });
       }
     }
-    const ttftCount = prometheus[names.ttftCount] ?? 0;
-    const avgTtftMs = ttftCount > 0 ? ((prometheus[names.ttftSum] ?? 0) / ttftCount) * 1000 : 0;
+    const avgTtftMs = cumulativeTtftMs(prometheus, names);
     const peakData = yield* context.stores.peakMetricsStore.getEffect(modelId);
     const bestSessionPeakData =
       yield* context.stores.peakMetricsStore.getBestSessionEffect(modelId);
@@ -140,8 +143,8 @@ const buildCurrentMetrics = (
     return {
       ...baseMetrics,
       model_id: modelId,
-      model_path: current?.model_path ?? null,
-      served_model_name: current?.served_model_name ?? scrape.modelName ?? null,
+      model_path: observation.modelPath,
+      served_model_name: observation.servedModelName,
       running_requests: firstMetric(prometheus, names.runningRequests),
       pending_requests: firstMetric(prometheus, names.pendingRequests),
       kv_cache_usage: firstMetric(prometheus, names.kvCacheUsage),

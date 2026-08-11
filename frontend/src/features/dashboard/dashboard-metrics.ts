@@ -75,7 +75,7 @@ export function metricsBelongToProcess(
   process: ProcessInfo | null,
 ): boolean {
   if (!metrics) return false;
-  if (!process) return false;
+  if (!process) return metricIds(metrics).size > 0;
   const ids = processMetricIds(process);
   if (ids.size === 0) return false;
   const idsFromMetrics = metricIds(metrics);

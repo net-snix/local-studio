@@ -162,6 +162,26 @@ Recipes launch through the controller runtime layer. Wired backend families:
 Runtime target discovery, models, integrations, and server controls are
 surfaced in Configure; selections persist in the controller data directory.
 
+## Linux host dashboard
+
+The Dashboard tab at `/dashboard` shows live telemetry for the controller host:
+CPU, memory, NVIDIA GPUs, disks, sensors, local services, inference backends,
+and Docker containers. It reads `GET /linux-dashboard` and the shared
+`GET /linux-dashboard/stream` SSE feed through the normal frontend proxy.
+Telemetry graphs keep the latest five observed minutes, pause while the page is
+inactive, and render a break instead of connecting samples across a pause. The
+runtime strip also observes a healthy configured inference endpoint when it was
+started outside Local Studio; lifecycle controls remain limited to models owned
+by Local Studio.
+
+Set `LOCAL_STUDIO_DASHBOARD_DISKS` to a comma-separated list of `label:/path`
+entries to monitor additional mounts. Service probes default to the production
+frontend on port `4783`, the controller on its configured port, and the agent
+runtime on port `8081`; override optional probes with the corresponding
+`LOCAL_STUDIO_DASHBOARD_*_PORT` variables. Restart and shutdown controls require
+passwordless `sudo` for the controller service user and fail without scheduling
+the power action when that permission is unavailable.
+
 ## Production
 
 Build the frontend, then serve the controller and standalone frontend in separate
