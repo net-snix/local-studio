@@ -2,10 +2,13 @@ import type { LinuxDashboardGpu, LinuxDashboardHealth, LinuxDashboardSnapshot } 
 import { formatBytes, formatPercent, formatTemp } from "./dashboard-format";
 import {
   getCpuUsageSamples,
+  getMemoryUsageSamples,
   getGpuUsageSamples,
   type DashboardHistoryPoint,
   type DashboardUsageSample,
 } from "./dashboard-history";
+import { projectDashboardChartSegments } from "./dashboard-chart-model";
+import { DashboardChartSeries } from "./dashboard-chart-series";
 import { Meter, Section } from "./dashboard-system-sections";
 
 const CHART_WIDTH = 360;
@@ -13,11 +16,6 @@ const CHART_HEIGHT = 96;
 const CHART_PAD = 6;
 const CHART_WINDOW_MS = 5 * 60 * 1000;
 const COMPACT_CHART_WINDOW_MS = 60 * 1000;
-
-type ChartPoint = {
-  x: number;
-  y: number;
-};
 
 type ChartScale = "percent" | "active";
 
@@ -63,45 +61,7 @@ const chartScaleMax = (samples: DashboardUsageSample[], scale: ChartScale): numb
   return Math.ceil(peak / 500) * 500;
 };
 
-const toChartPoints = (
-  samples: DashboardUsageSample[],
-  scaleMax: number,
-  windowMs: number,
-): ChartPoint[] => {
-  const visibleSamples = samples.flatMap((sample): Array<{ time: number; value: number }> => {
-    if (
-      typeof sample.value !== "number" ||
-      !Number.isFinite(sample.value) ||
-      !Number.isFinite(sample.time)
-    ) {
-      return [];
-    }
-    return [{ time: sample.time, value: sample.value }];
-  });
-  const first = visibleSamples[0];
-  const last = visibleSamples.at(-1);
-  if (!first || !last) return [];
-  const elapsed = last.time - first.time;
-  const start = elapsed >= windowMs ? last.time - windowMs : first.time;
-  const end = start + windowMs;
-  const timeSpan = Math.max(end - start, 1);
-
-  return visibleSamples.flatMap((sample): ChartPoint[] => {
-    const value = sample.value;
-    const x = CHART_PAD + ((sample.time - start) / timeSpan) * (CHART_WIDTH - CHART_PAD * 2);
-    const y =
-      CHART_PAD +
-      ((scaleMax - Math.min(scaleMax, Math.max(0, value))) / scaleMax) *
-        (CHART_HEIGHT - CHART_PAD * 2);
-    return [{ x, y }];
-  });
-};
-
-const buildLinePath = (points: ChartPoint[]): string => {
-  if (points.length < 2) return "";
-  const [first, ...rest] = points;
-  return rest.reduce((path, point) => `${path} L ${point.x} ${point.y}`, `M ${first.x} ${first.y}`);
-};
+const chartGeometry = { width: CHART_WIDTH, height: CHART_HEIGHT, pad: CHART_PAD } as const;
 
 function UsageLineChart({
   samples,
@@ -118,8 +78,7 @@ function UsageLineChart({
 }) {
   const visibleSamples = samplesInWindow(samples, windowMs);
   const scaleMax = chartScaleMax(visibleSamples, scale);
-  const points = toChartPoints(visibleSamples, scaleMax, windowMs);
-  const linePath = buildLinePath(points);
+  const segments = projectDashboardChartSegments(visibleSamples, scaleMax, windowMs, chartGeometry);
 
   return (
     <svg
@@ -146,16 +105,12 @@ function UsageLineChart({
           />
         );
       })}
-      {linePath ? (
-        <path
-          d={linePath}
-          fill="none"
+      {segments.length > 0 ? (
+        <DashboardChartSeries
+          segments={segments}
           stroke={stroke}
-          strokeLinecap="square"
-          strokeLinejoin="miter"
           strokeOpacity={muted ? 0.34 : 0.78}
           strokeWidth={muted ? 1.4 : 2.1}
-          vectorEffect="non-scaling-stroke"
         />
       ) : (
         <text x="50%" y="50%" textAnchor="middle" className="fill-(--dim) text-[10px]">
@@ -179,8 +134,12 @@ function DashboardSparkline({
 }) {
   const visibleSamples = samplesInWindow(samples, COMPACT_CHART_WINDOW_MS);
   const scaleMax = chartScaleMax(visibleSamples, scale);
-  const points = toChartPoints(visibleSamples, scaleMax, COMPACT_CHART_WINDOW_MS);
-  const linePath = buildLinePath(points);
+  const segments = projectDashboardChartSegments(
+    visibleSamples,
+    scaleMax,
+    COMPACT_CHART_WINDOW_MS,
+    chartGeometry,
+  );
 
   return (
     <svg
@@ -202,16 +161,12 @@ function DashboardSparkline({
           strokeWidth="1.6"
           vectorEffect="non-scaling-stroke"
         />
-      ) : linePath ? (
-        <path
-          d={linePath}
-          fill="none"
+      ) : segments.length > 0 ? (
+        <DashboardChartSeries
+          segments={segments}
           stroke={stroke}
-          strokeLinecap="square"
-          strokeLinejoin="miter"
-          strokeOpacity="0.92"
-          strokeWidth="1.8"
-          vectorEffect="non-scaling-stroke"
+          strokeOpacity={0.92}
+          strokeWidth={1.8}
         />
       ) : (
         <line
@@ -242,13 +197,10 @@ export function SystemOverview({
     latestNumber(cpuSamples.map((sample) => sample.value)) ??
     data.cpu.usage_percent ??
     data.cpu.load_percent_1m;
-  const memorySamples = history.map((point) => ({
-    time: point.time,
-    value: point.memory_used_percent,
-  }));
+  const memorySamples = getMemoryUsageSamples(history);
 
   return (
-    <Section title="Host telemetry" meta="last 60 seconds">
+    <Section title="Host telemetry" meta="last 60 observed seconds">
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)]">
         <TrendPanel title="CPU usage" value={formatPercent(cpuCurrent)} size="large">
           <UsageLineChart
