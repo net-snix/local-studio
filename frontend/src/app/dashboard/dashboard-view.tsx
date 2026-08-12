@@ -1,14 +1,14 @@
 "use client";
 
 import { useMemo } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw } from "@/ui/icon-registry";
 import type { DashboardLayoutProps } from "@/features/dashboard/layout/dashboard-types";
 import type {
   LinuxDashboardAlert,
   LinuxDashboardHealth,
   LinuxDashboardSnapshot,
 } from "@/lib/types";
-import { formatBytes, formatUptime } from "./dashboard-format";
+import { formatUptime } from "./dashboard-format";
 import { formatGpuGb, formatGpuPower, GpuTelemetry, SystemOverview } from "./dashboard-charts";
 import { type DashboardHistoryPoint } from "./dashboard-history";
 import { DashboardModelRuntime, type DashboardHostSummary } from "./dashboard-model-runtime";
@@ -63,7 +63,7 @@ export function LinuxDashboardView({
   const summary = data ? buildSummary(data, history) : null;
   const dashboardControls = (
     <>
-      <label className="inline-flex h-8 items-center gap-2 px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--dim) hover:bg-(--fg)/5">
+      <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs text-(--dim) hover:bg-(--hover) hover:text-(--fg)">
         <input
           type="checkbox"
           checked={autoRefresh}
@@ -74,7 +74,7 @@ export function LinuxDashboardView({
       </label>
       <button
         onClick={onRefresh}
-        className="inline-flex h-8 items-center gap-2 px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--fg) hover:bg-(--fg)/5"
+        className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs text-(--dim) hover:bg-(--hover) hover:text-(--fg)"
       >
         <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
         Refresh
@@ -90,9 +90,9 @@ export function LinuxDashboardView({
           <button
             onClick={open}
             disabled={running}
-            className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
+            className="inline-flex h-8 items-center rounded-md px-2 text-xs text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
           >
-            {running ? "Restarting..." : "Restart"}
+            {running ? "Restarting…" : "Restart"}
           </button>
         )}
       />
@@ -103,9 +103,9 @@ export function LinuxDashboardView({
           <button
             onClick={open}
             disabled={running}
-            className="inline-flex h-8 items-center px-2 font-mono text-[10px] uppercase tracking-[0.14em] text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
+            className="inline-flex h-8 items-center rounded-md px-2 text-xs text-(--err) hover:bg-(--err)/10 disabled:opacity-40"
           >
-            {running ? "Shutting..." : "Shut down"}
+            {running ? "Shutting down…" : "Shut down"}
           </button>
         )}
       />
@@ -114,64 +114,66 @@ export function LinuxDashboardView({
 
   if (loading && !data) {
     return (
-      <div className="flex min-h-full items-center justify-center bg-(--bg) font-mono text-xs text-(--dim)">
+      <div className="flex min-h-full items-center justify-center bg-(--bg) text-[length:var(--fs-sm)] text-(--dim)">
         <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-        Loading dashboard...
+        Loading dashboard…
       </div>
     );
   }
 
   return (
     <div className="min-h-full bg-(--bg) text-(--fg)">
-      <div className="mx-auto max-w-[1600px] px-3 py-3 pb-[calc(1.5rem+env(safe-area-inset-bottom))] sm:px-4 lg:px-5">
-        <DashboardModelRuntime
-          statusData={statusData}
-          hostname={data?.host.hostname}
-          healthStatus={topStatus}
-          hostSummary={summary}
-          controls={dashboardControls}
-          trailingControls={dashboardTrailingControls}
-        />
+      <div className="mx-auto max-w-[118rem] overflow-x-hidden px-3 py-3 pb-[calc(2rem+env(safe-area-inset-bottom))] sm:px-6 sm:py-6 2xl:px-10">
+        <div className="mx-auto w-full max-w-[86rem] px-1 pt-2">
+          <DashboardModelRuntime
+            statusData={statusData}
+            hostname={data?.host.hostname}
+            healthStatus={topStatus}
+            hostSummary={summary}
+            controls={dashboardControls}
+            trailingControls={dashboardTrailingControls}
+          />
 
-        {error ? (
-          <div className="mt-4 border border-(--err)/35 px-3 py-2 font-mono text-[11px] text-(--err)">
-            {error}
-          </div>
-        ) : null}
-
-        {data ? (
-          <main className="mt-3 space-y-2.5">
-            {visibleAlerts.length > 0 ? <AlertStrip alerts={visibleAlerts} /> : null}
-
-            <SystemOverview data={data} history={history} status={topStatus} />
-            <GpuTelemetry data={data} history={history} />
-
-            <div className="grid gap-2.5 xl:grid-cols-[minmax(0,1.36fr)_minmax(0,0.84fr)_minmax(0,0.98fr)_minmax(0,1.18fr)]">
-              <Section title="Disks">
-                <DisksTable disks={data.disks} />
-              </Section>
-              <Section title="Services">
-                <ServicesTable services={data.services} />
-              </Section>
-
-              <Section title="Backends">
-                <BackendsTable
-                  runtimeSummary={statusData.runtimeSummary}
-                  knownBackendIds={knownBackendIds(statusData)}
-                  activeBackend={statusData.currentProcess?.backend}
-                />
-              </Section>
-
-              <Section title="Sensors / Thermals">
-                <Sensors data={data} />
-              </Section>
+          {error ? (
+            <div className="mx-2 mt-4 rounded-md border border-(--err)/40 bg-(--err)/10 px-3 py-2 text-[length:var(--fs-sm)] text-(--err)">
+              {error}
             </div>
+          ) : null}
 
-            <Section title="Containers">
-              <ContainersTable data={data} />
-            </Section>
-          </main>
-        ) : null}
+          {data ? (
+            <main>
+              {visibleAlerts.length > 0 ? <AlertStrip alerts={visibleAlerts} /> : null}
+
+              <SystemOverview data={data} history={history} status={topStatus} />
+              <GpuTelemetry data={data} history={history} />
+
+              <div className="grid gap-x-8 xl:grid-cols-[minmax(0,1.36fr)_minmax(0,0.84fr)_minmax(0,0.98fr)_minmax(0,1.18fr)]">
+                <Section title="Disks">
+                  <DisksTable disks={data.disks} />
+                </Section>
+                <Section title="Services">
+                  <ServicesTable services={data.services} />
+                </Section>
+
+                <Section title="Backends">
+                  <BackendsTable
+                    runtimeSummary={statusData.runtimeSummary}
+                    knownBackendIds={knownBackendIds(statusData)}
+                    activeBackend={statusData.currentProcess?.backend}
+                  />
+                </Section>
+
+                <Section title="Sensors / Thermals">
+                  <Sensors data={data} />
+                </Section>
+              </div>
+
+              <Section title="Containers">
+                <ContainersTable data={data} />
+              </Section>
+            </main>
+          ) : null}
+        </div>
       </div>
     </div>
   );
