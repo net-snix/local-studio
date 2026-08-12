@@ -469,6 +469,8 @@ export function modelsToPiModels(models: AgentModel[]) {
     // turns. Keep the ordinary `reasoning_effort` mapping for controller models.
     const deepSeekReasoning =
       isDeepSeekReasoningModel(model) && !isControllerBackedModel(model);
+    const controllerDeepSeekReasoning =
+      isDeepSeekReasoningModel(model) && isControllerBackedModel(model);
     const inklingReasoning = isInklingReasoningModel(model);
     return {
       id: model.rawId ?? model.id,
@@ -491,19 +493,35 @@ export function modelsToPiModels(models: AgentModel[]) {
               max: "max",
             },
           }
-        : inklingReasoning
+        : controllerDeepSeekReasoning
           ? {
+              // The vLLM controller surface forwards reasoning_effort into the
+              // DeepSeek V4 encoder, which defines low/high/max; medium maps up,
+              // and max/xhigh must be mapped here or supportedPiThinkingLevels
+              // hides them from the picker.
               thinkingLevelMap: {
-                off: "none",
-                minimal: "minimal",
+                off: null,
+                minimal: null,
                 low: "low",
-                medium: "medium",
+                medium: "high",
                 high: "high",
-                xhigh: null,
+                xhigh: "max",
                 max: "max",
               },
             }
-          : {}),
+          : inklingReasoning
+            ? {
+                thinkingLevelMap: {
+                  off: "none",
+                  minimal: "minimal",
+                  low: "low",
+                  medium: "medium",
+                  high: "high",
+                  xhigh: null,
+                  max: "max",
+                },
+              }
+            : {}),
       compat: {
         ...VLLM_OPENAI_COMPAT,
         ...(deepSeekReasoning
