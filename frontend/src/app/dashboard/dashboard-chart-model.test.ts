@@ -24,12 +24,12 @@ describe("dashboard chart projection", () => {
     assert.match(dashboardChartPath(segments[0] ?? []), /^M 10 82 L 90 74$/);
   });
 
-  test("starts a new segment after a resumed observation", () => {
+  test("keeps timestamped samples on one continuous line", () => {
     const segments = projectDashboardChartSegments(
       [
         { time: 0, value: 10 },
         { time: 1000, value: 20 },
-        { time: 2000, value: 90, break_before: true },
+        { time: 2000, value: 90 },
         { time: 3000, value: 80 },
       ],
       100,
@@ -37,13 +37,10 @@ describe("dashboard chart projection", () => {
       geometry,
     );
 
-    assert.equal(segments.length, 2);
+    assert.equal(segments.length, 1);
     assert.deepEqual(
       segments.map((segment) => segment.map((point) => point.y)),
-      [
-        [82, 74],
-        [18, 26],
-      ],
+      [[82, 74, 18, 26]],
     );
   });
 

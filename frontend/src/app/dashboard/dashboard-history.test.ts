@@ -121,7 +121,7 @@ test("dashboard history deduplicates snapshots and keeps the newest samples insi
   assert.equal(deduped, history);
 });
 
-test("dashboard history keeps only the newest five observed minutes", () => {
+test("dashboard history keeps only the newest five wall-clock minutes", () => {
   const start = Date.parse("2026-04-29T10:00:00.000Z");
   const history = Array.from({ length: 302 }, (_, offset) =>
     makeSnapshot(new Date(start + offset * 1000).toISOString(), offset, [offset]),
@@ -135,7 +135,7 @@ test("dashboard history keeps only the newest five observed minutes", () => {
   assert.equal(history.at(-1)?.collected_at, "2026-04-29T10:05:01.000Z");
 });
 
-test("dashboard history pauses observed time and marks a resumed sample as discontinuous", () => {
+test("dashboard history preserves real elapsed time", () => {
   const history = [
     makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]),
     makeSnapshot("2026-04-29T10:00:01.000Z", 15, [25]),
@@ -146,12 +146,8 @@ test("dashboard history pauses observed time and marks a resumed sample as disco
   );
 
   assert.deepEqual(
-    history.map((point) => ({ time: point.time, breakBefore: point.break_before ?? false })),
-    [
-      { time: Date.parse("2026-04-29T10:00:00.000Z"), breakBefore: false },
-      { time: Date.parse("2026-04-29T10:00:01.000Z"), breakBefore: false },
-      { time: Date.parse("2026-04-29T10:00:02.000Z"), breakBefore: true },
-    ],
+    history.map((point) => point.time),
+    [Date.parse("2026-04-29T10:10:00.000Z")],
   );
 });
 
@@ -244,7 +240,15 @@ test("dashboard history persists and restores valid browser history", () => {
 
   storeDashboardHistory(history);
 
-  assert.deepEqual(loadStoredDashboardHistory(), history);
+  assert.deepEqual(loadStoredDashboardHistory(Date.parse("2026-04-29T10:00:01.000Z")), history);
+});
+
+test("dashboard history drops persisted samples older than wall-clock history", () => {
+  stubStorage();
+  const history = appendDashboardHistory([], makeSnapshot("2026-04-29T10:00:00.000Z", 10, [20]));
+  storeDashboardHistory(history);
+
+  assert.deepEqual(loadStoredDashboardHistory(Date.parse("2026-04-29T10:06:00.000Z")), []);
 });
 
 test("dashboard history ignores invalid stored history", () => {

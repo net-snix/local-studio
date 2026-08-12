@@ -32,7 +32,6 @@ export const projectDashboardChartSegments = (
   };
 
   for (const sample of samples) {
-    if (sample.break_before) finishSegment();
     if (
       typeof sample.value !== "number" ||
       !Number.isFinite(sample.value) ||

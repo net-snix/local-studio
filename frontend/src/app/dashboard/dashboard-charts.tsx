@@ -200,7 +200,7 @@ export function SystemOverview({
   const memorySamples = getMemoryUsageSamples(history);
 
   return (
-    <Section title="Host telemetry" meta="last 60 observed seconds">
+    <Section title="Host telemetry" meta="last 60 seconds">
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)]">
         <TrendPanel title="CPU usage" value={formatPercent(cpuCurrent)} size="large">
           <UsageLineChart
