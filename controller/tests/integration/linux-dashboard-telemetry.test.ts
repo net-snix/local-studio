@@ -62,4 +62,26 @@ describe("linux dashboard telemetry", () => {
     expect(Option.isSome(secondEvent) ? secondEvent.value.type : null).toBe("snapshot");
     expect(collections).toBe(1);
   });
+
+  it("replays retained one-second snapshots after a subscriber reconnects", async () => {
+    let collections = 0;
+    const telemetry = new LinuxDashboardTelemetry(
+      () =>
+        Effect.sync(() => {
+          collections += 1;
+          return snapshot(collections);
+        }),
+      { historyLimit: 4, intervalMs: 5 },
+    );
+
+    await Effect.runPromise(Stream.runCollect(Stream.take(telemetry.subscribe(), 4)));
+    const replay = await Effect.runPromise(
+      Stream.runCollect(Stream.take(telemetry.subscribe(), 4)),
+    );
+    const replayedIndices = Array.from(replay).map((event) =>
+      event.type === "snapshot" ? event.snapshot.cpu.usage_percent : null,
+    );
+
+    expect(replayedIndices).toEqual([1, 2, 3, 4]);
+  });
 });

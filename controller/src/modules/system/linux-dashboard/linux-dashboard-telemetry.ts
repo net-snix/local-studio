@@ -3,13 +3,14 @@ import type { Scope } from "effect";
 import type { LinuxDashboardSnapshot } from "./linux-dashboard-types";
 
 const DEFAULT_INTERVAL_MS = 1_000;
-const SUBSCRIBER_QUEUE_SIZE = 2;
+const DEFAULT_HISTORY_LIMIT = 360;
 
 export type LinuxDashboardTelemetryEvent =
   | { type: "snapshot"; snapshot: LinuxDashboardSnapshot }
   | { type: "error"; message: string; timestamp: string };
 
 export type LinuxDashboardTelemetryOptions = {
+  historyLimit?: number;
   intervalMs?: number;
 };
 
@@ -17,7 +18,7 @@ type SnapshotCollector = () => Effect.Effect<LinuxDashboardSnapshot, unknown>;
 
 type TelemetrySubscription = {
   subscription: PubSub.Subscription<LinuxDashboardTelemetryEvent>;
-  latest: LinuxDashboardSnapshot | null;
+  history: LinuxDashboardSnapshot[];
   pubsub: PubSub.PubSub<LinuxDashboardTelemetryEvent>;
 };
 
@@ -39,11 +40,13 @@ const abortEffect = (signal?: AbortSignal): Effect.Effect<void> =>
 
 export class LinuxDashboardTelemetry {
   private readonly collectSnapshot: SnapshotCollector;
+  private readonly historyLimit: number;
   private readonly intervalMs: number;
   private readonly stateLock = Semaphore.makeUnsafe(1);
   private readonly collectionLock = Semaphore.makeUnsafe(1);
   private events: PubSub.PubSub<LinuxDashboardTelemetryEvent> | null = null;
   private latest: LinuxDashboardSnapshot | null = null;
+  private history: LinuxDashboardSnapshot[] = [];
   private lastCollectedAtMs = 0;
   private subscribers = 0;
   private loopFiber: Fiber.Fiber<void, never> | null = null;
@@ -53,6 +56,7 @@ export class LinuxDashboardTelemetry {
     options: LinuxDashboardTelemetryOptions = {},
   ) {
     this.collectSnapshot = collectSnapshot;
+    this.historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT;
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
   }
 
@@ -78,17 +82,14 @@ export class LinuxDashboardTelemetry {
   public subscribe(signal?: AbortSignal): Stream.Stream<LinuxDashboardTelemetryEvent> {
     const stream = Stream.unwrap(
       Effect.acquireRelease(this.acquire(), (state) => this.release(state.pubsub)).pipe(
-        Effect.map(({ subscription, latest }) => {
+        Effect.map(({ subscription, history }) => {
           const events = Stream.fromEffectRepeat(PubSub.take(subscription));
-          return latest
-            ? Stream.concat(
-                Stream.succeed<LinuxDashboardTelemetryEvent>({
-                  type: "snapshot",
-                  snapshot: latest,
-                }),
-                events,
-              )
-            : events;
+          const retained = Stream.fromIterable(
+            history.map(
+              (snapshot): LinuxDashboardTelemetryEvent => ({ type: "snapshot", snapshot }),
+            ),
+          );
+          return Stream.concat(retained, events);
         }),
       ),
     );
@@ -101,14 +102,14 @@ export class LinuxDashboardTelemetry {
       Effect.gen(function* () {
         const pubsub =
           telemetry.events ??
-          (yield* PubSub.sliding<LinuxDashboardTelemetryEvent>(SUBSCRIBER_QUEUE_SIZE));
+          (yield* PubSub.sliding<LinuxDashboardTelemetryEvent>(telemetry.historyLimit + 16));
         telemetry.events = pubsub;
         const subscription = yield* PubSub.subscribe(pubsub);
         telemetry.subscribers += 1;
         if (!telemetry.loopFiber) {
           telemetry.loopFiber = yield* Effect.forkDetach(telemetry.runLoop());
         }
-        return { subscription, latest: telemetry.latest, pubsub };
+        return { subscription, history: [...telemetry.history], pubsub };
       }),
     );
   }
@@ -153,6 +154,7 @@ export class LinuxDashboardTelemetry {
       Effect.tap((snapshot) =>
         Effect.gen(function* () {
           telemetry.latest = snapshot;
+          telemetry.history = [...telemetry.history, snapshot].slice(-telemetry.historyLimit);
           telemetry.lastCollectedAtMs = Date.now();
           yield* telemetry.publish({ type: "snapshot", snapshot });
         }),

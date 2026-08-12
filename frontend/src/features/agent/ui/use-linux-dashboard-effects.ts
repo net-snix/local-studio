@@ -9,6 +9,7 @@ import api from "@/lib/api/client";
 import type { LinuxDashboardSnapshot } from "@/lib/types";
 
 const STREAM_RECONNECT_MS = 2_000;
+const STREAM_STALE_MS = 5_000;
 
 type LoadDashboardSnapshot = (mode?: "initial" | "refresh") => Promise<void>;
 
@@ -68,7 +69,8 @@ export function useLinuxDashboardEffects({
       let disposed = false;
       let streamAbort: AbortController | null = null;
       let reconnectId: number | null = null;
-      let resumePromise: Promise<void> | null = null;
+      let lastSnapshotAt = Date.now();
+      let recoveryPending = false;
 
       const clearReconnect = (): void => {
         if (reconnectId === null) return;
@@ -82,10 +84,8 @@ export function useLinuxDashboardEffects({
         streamAbort = null;
       };
 
-      const isVisible = (): boolean => document.visibilityState === "visible";
-
       const connect = async (): Promise<void> => {
-        if (disposed || !isVisible() || streamAbort) return;
+        if (disposed || streamAbort) return;
         const abort = new AbortController();
         streamAbort = abort;
         try {
@@ -97,6 +97,8 @@ export function useLinuxDashboardEffects({
             if (abort.signal.aborted) break;
             if (event.event === "linux-dashboard") {
               if (isLinuxDashboardSnapshot(event.data)) {
+                lastSnapshotAt = Date.now();
+                recoveryPending = false;
                 applySnapshot(event.data);
                 setLoading(false);
                 setError(null);
@@ -115,8 +117,9 @@ export function useLinuxDashboardEffects({
           }
         } finally {
           if (streamAbort === abort) streamAbort = null;
+          recoveryPending = false;
           setRefreshing(false);
-          if (!disposed && !abort.signal.aborted && isVisible()) {
+          if (!disposed && !abort.signal.aborted) {
             clearReconnect();
             reconnectId = window.setTimeout(() => {
               reconnectId = null;
@@ -126,29 +129,26 @@ export function useLinuxDashboardEffects({
         }
       };
 
-      const resume = (): void => {
-        if (disposed || !isVisible()) return;
+      const recoverIfStale = (): void => {
+        if (
+          disposed ||
+          recoveryPending ||
+          (streamAbort && Date.now() - lastSnapshotAt <= STREAM_STALE_MS)
+        ) {
+          return;
+        }
+        recoveryPending = true;
         disconnect();
-        if (resumePromise) return;
-        resumePromise = load(hasSnapshotRef.current ? "refresh" : "initial").finally(() => {
-          resumePromise = null;
-          if (!disposed && isVisible()) void connect();
-        });
+        void connect();
       };
 
-      const unsubscribeResume = subscribeLinuxDashboardResume(document, window, {
-        onHidden: () => {
-          disconnect();
-          setRefreshing(false);
-        },
-        onVisible: resume,
-      });
+      const unsubscribeActivity = subscribeLinuxDashboardActivity(document, window, recoverIfStale);
 
       void connect();
 
       return () => {
         disposed = true;
-        unsubscribeResume();
+        unsubscribeActivity();
         disconnect();
       };
     },
@@ -169,50 +169,30 @@ export function useLinuxDashboardEffects({
 
 const getLinuxDashboardEffectsSnapshot = (): number => 0;
 
-type DashboardResumeCallbacks = {
-  onHidden: () => void;
-  onVisible: () => void;
-};
-
 type DashboardVisibilityTarget = EventTarget & {
   visibilityState: DocumentVisibilityState;
 };
 
-export function subscribeLinuxDashboardResume(
+export function subscribeLinuxDashboardActivity(
   documentTarget: DashboardVisibilityTarget,
   windowTarget: EventTarget,
-  callbacks: DashboardResumeCallbacks,
+  onActive: () => void,
 ): () => void {
-  let active = documentTarget.visibilityState === "visible";
-  const resumeWhenVisible = (): void => {
-    if (documentTarget.visibilityState !== "visible" || active) return;
-    active = true;
-    callbacks.onVisible();
-  };
-  const pause = (): void => {
-    if (!active) return;
-    active = false;
-    callbacks.onHidden();
-  };
   const onVisibility = (): void => {
-    if (documentTarget.visibilityState === "visible") resumeWhenVisible();
-    else pause();
+    if (documentTarget.visibilityState === "visible") onActive();
   };
   const onPageShow = (event: Event): void => {
     if (!(event as PageTransitionEvent).persisted) return;
-    active = false;
-    resumeWhenVisible();
+    onActive();
   };
 
   documentTarget.addEventListener("visibilitychange", onVisibility);
-  windowTarget.addEventListener("blur", pause);
-  windowTarget.addEventListener("focus", resumeWhenVisible);
+  windowTarget.addEventListener("focus", onActive);
   windowTarget.addEventListener("pageshow", onPageShow);
 
   return () => {
     documentTarget.removeEventListener("visibilitychange", onVisibility);
-    windowTarget.removeEventListener("blur", pause);
-    windowTarget.removeEventListener("focus", resumeWhenVisible);
+    windowTarget.removeEventListener("focus", onActive);
     windowTarget.removeEventListener("pageshow", onPageShow);
   };
 }

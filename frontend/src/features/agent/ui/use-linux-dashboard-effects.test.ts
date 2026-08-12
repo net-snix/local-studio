@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { subscribeLinuxDashboardResume } from "./use-linux-dashboard-effects";
+import { subscribeLinuxDashboardActivity } from "./use-linux-dashboard-effects";
 
 class VisibilityTarget extends EventTarget {
   visibilityState: DocumentVisibilityState = "visible";
@@ -12,18 +12,18 @@ const persistedPageShow = (): Event => {
   return event;
 };
 
-describe("linux dashboard resume lifecycle", () => {
-  test("pauses when inactive and coalesces visibility and focus resume events", () => {
+describe("linux dashboard activity lifecycle", () => {
+  test("keeps background collection active and checks recovery on return", () => {
     const documentTarget = new VisibilityTarget();
     const windowTarget = new EventTarget();
     const events: string[] = [];
-    const unsubscribe = subscribeLinuxDashboardResume(documentTarget, windowTarget, {
-      onHidden: () => events.push("hidden"),
-      onVisible: () => events.push("visible"),
-    });
+    const unsubscribe = subscribeLinuxDashboardActivity(documentTarget, windowTarget, () =>
+      events.push("active"),
+    );
 
     documentTarget.visibilityState = "hidden";
     documentTarget.dispatchEvent(new Event("visibilitychange"));
+    windowTarget.dispatchEvent(new Event("blur"));
     windowTarget.dispatchEvent(new Event("focus"));
 
     documentTarget.visibilityState = "visible";
@@ -31,14 +31,10 @@ describe("linux dashboard resume lifecycle", () => {
     windowTarget.dispatchEvent(new Event("focus"));
     windowTarget.dispatchEvent(new Event("pageshow"));
     windowTarget.dispatchEvent(persistedPageShow());
-    windowTarget.dispatchEvent(new Event("blur"));
-    windowTarget.dispatchEvent(new Event("focus"));
-
-    assert.deepEqual(events, ["hidden", "visible", "visible", "hidden", "visible"]);
+    assert.deepEqual(events, ["active", "active", "active", "active"]);
 
     unsubscribe();
-    windowTarget.dispatchEvent(new Event("blur"));
     windowTarget.dispatchEvent(new Event("focus"));
-    assert.equal(events.length, 5);
+    assert.equal(events.length, 4);
   });
 });
