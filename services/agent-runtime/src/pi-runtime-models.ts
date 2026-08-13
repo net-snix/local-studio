@@ -117,15 +117,21 @@ function userPiModelToAgentModel(
   };
 }
 
-function supportedPiThinkingLevels(
+export function supportedPiThinkingLevels(
   model: PiProviderModel,
   reasoning: boolean,
   providerCompat?: Record<string, unknown>,
 ): AgentThinkingLevel[] {
   if (!reasoning) return ["off"];
+  // An explicit thinkingLevelMap declares the model's own level vocabulary and
+  // wire path (e.g. chat-template kwargs), so it must not be collapsed to
+  // "high" just because the provider rejects the top-level reasoning_effort
+  // param — that is exactly the shape of the vLLM DS4 chat-template config.
+  const hasLevelMap =
+    model.thinkingLevelMap != null && Object.keys(model.thinkingLevelMap).length > 0;
   const supportsReasoningEffort =
     model.compat?.supportsReasoningEffort ?? providerCompat?.supportsReasoningEffort;
-  if (supportsReasoningEffort !== true) return ["high"];
+  if (!hasLevelMap && supportsReasoningEffort !== true) return ["high"];
   return AGENT_THINKING_LEVELS.filter((level) => {
     const mapped = model.thinkingLevelMap?.[level];
     if (mapped === null) return false;
