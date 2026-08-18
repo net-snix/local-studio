@@ -1,10 +1,17 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { GitAction, GitRef, GitState, GitStatusEntry } from "@/features/agent/contracts";
+import type {
+  GitAction,
+  GitBranch,
+  GitRef,
+  GitState,
+  GitStatusEntry,
+  GitWorktree,
+} from "@/features/agent/contracts";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,9 +25,20 @@ export function configuredGitRoots(): string[] {
 
 export function resolveGitCwd(input: string, roots = configuredGitRoots()): string | null {
   if (!path.isAbsolute(input)) return null;
-  const candidate = path.resolve(input);
+  let candidate: string;
+  try {
+    candidate = realpathSync(path.resolve(input));
+  } catch {
+    return null;
+  }
   return roots.some((root) => {
-    const relative = path.relative(root, candidate);
+    let canonicalRoot: string;
+    try {
+      canonicalRoot = realpathSync(path.resolve(root));
+    } catch {
+      return false;
+    }
+    const relative = path.relative(canonicalRoot, candidate);
     return (
       relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
     );
@@ -35,9 +53,13 @@ export function assertGitCwd(
   const requested = input?.trim();
   if (!requested) return { error: Response.json({ error: "cwd is required" }, { status: 400 }) };
   const cwd = resolveGitCwd(requested);
-  if (!cwd) return { error: Response.json({ error: "cwd must be absolute" }, { status: 400 }) };
-  if (!existsSync(cwd))
-    return { error: Response.json({ error: "cwd not found" }, { status: 404 }) };
+  if (!cwd)
+    return {
+      error: Response.json(
+        { error: "cwd must be an existing directory within a configured Git root" },
+        { status: 400 },
+      ),
+    };
   return { cwd };
 }
 
@@ -122,6 +144,29 @@ export async function runGitAction(cwd: string, action: GitAction): Promise<GitS
   if (action.action === "init") await git(cwd, ["init"]);
   if (action.action === "checkout")
     await git(cwd, ["switch", "--", assertNotOption(action.ref, "ref")]);
+  if (action.action === "switch_branch")
+    await git(cwd, ["switch", assertNotOption(action.branch, "branch")]);
+  if (action.action === "create_branch")
+    await git(cwd, ["switch", "-c", assertNotOption(action.branch, "branch")]);
+  if (action.action === "add_worktree") {
+    const branch = assertNotOption(action.branch, "branch");
+    const worktreePath = assertWorktreePath(action.path);
+    const hasBranch = Boolean(
+      (
+        await git(cwd, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).catch(() => "")
+      ).trim(),
+    );
+    await git(
+      cwd,
+      hasBranch
+        ? ["worktree", "add", worktreePath, branch]
+        : ["worktree", "add", "-b", branch, worktreePath],
+    );
+  }
+  if (action.action === "remove_worktree") {
+    const worktreePath = assertWorktreePath(action.path);
+    await git(cwd, ["worktree", "remove", "--force", worktreePath]);
+  }
   if (action.action === "commit") {
     await git(cwd, ["add", "--", ...(action.paths.length ? action.paths : ["."])]);
     await git(cwd, ["commit", "-m", action.message]);
@@ -132,6 +177,77 @@ export async function runGitAction(cwd: string, action: GitAction): Promise<GitS
     await git(cwd, state.hasUpstream || !branch ? ["push"] : ["push", "-u", "origin", branch]);
   }
   return loadGitState(cwd);
+}
+
+/** Local branches plus the remote branches of the repo in `cwd`, each marked
+ *  with whether it is the checked-out one and whether it lives on a remote. */
+export async function listBranches(cwd: string): Promise<GitBranch[]> {
+  const [branchRaw, localRaw] = await Promise.all([
+    git(cwd, ["branch", "--show-current"]).catch(() => ""),
+    git(cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]).catch(() => ""),
+  ]);
+  const current = branchRaw.trim() || null;
+  const branches: GitBranch[] = [];
+  const seen = new Set<string>();
+  for (const name of localRaw.split("\n")) {
+    const trimmed = name.trim();
+    if (!trimmed) continue;
+    seen.add(trimmed);
+    branches.push({ name: trimmed, current: trimmed === current, remote: false });
+  }
+  const remoteRaw = await git(cwd, [
+    "for-each-ref",
+    "--format=%(refname:short)",
+    "refs/remotes",
+  ]).catch(() => "");
+  for (const name of remoteRaw.split("\n")) {
+    const trimmed = name.trim();
+    if (!trimmed || seen.has(trimmed) || trimmed.endsWith("/HEAD")) continue;
+    branches.push({ name: trimmed, current: false, remote: true });
+  }
+  return branches;
+}
+
+/** The linked worktrees of the repo in `cwd`, parsed from porcelain output. */
+export async function listWorktrees(cwd: string): Promise<GitWorktree[]> {
+  const raw = await git(cwd, ["worktree", "list", "--porcelain"]).catch(() => "");
+  const worktrees: GitWorktree[] = [];
+  let entry: { path: string; branch: string | null } | null = null;
+  for (const line of raw.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      if (entry) worktrees.push({ ...entry, current: false });
+      entry = { path: line.slice("worktree ".length).trim(), branch: null };
+    } else if (entry && line.startsWith("branch ")) {
+      entry.branch = line
+        .slice("branch ".length)
+        .trim()
+        .replace(/^refs\/heads\//, "");
+    }
+  }
+  if (entry) worktrees.push({ ...entry, current: false });
+  const resolvedCwd = await path.resolve(cwd);
+  return worktrees.map((worktree) => ({
+    ...worktree,
+    current: path.resolve(worktree.path) === resolvedCwd,
+  }));
+}
+
+/** A worktree lives outside a project root (it is a sibling leaf of the repo),
+ *  but it must still resolve inside the configured git roots so a request can't
+ *  point git at an arbitrary filesystem path. */
+function assertWorktreePath(input: string): string {
+  const clean = input.trim();
+  if (!clean || !path.isAbsolute(clean)) throw new Error("Invalid worktree path: must be absolute");
+  const roots = configuredGitRoots();
+  const candidate = path.resolve(clean);
+  const within = roots.some((root) => {
+    const relative = path.relative(root, candidate);
+    return (
+      relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
+    );
+  });
+  if (!within) throw new Error("Invalid worktree path: outside allowed roots");
+  return candidate;
 }
 
 function emptyGitState(isRepo: boolean): GitState {

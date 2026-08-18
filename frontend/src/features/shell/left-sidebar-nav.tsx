@@ -2,18 +2,25 @@
 
 import Link from "next/link";
 import { type ComponentType, type MouseEvent } from "react";
-import { Activity, Boxes, Clock, LayoutDashboard, ServerCog, TrendingUp } from "@/ui/icon-registry";
+import {
+  AutomationsIcon,
+  ConfigureIcon,
+  LayoutDashboard,
+  ModelsIcon,
+  StatusIcon,
+  UsageIcon,
+} from "@/ui/icon-registry";
 
 export type IconComponent = ComponentType<{ className?: string; strokeWidth?: number }>;
 
 // Sessions has no nav row: the Search command palette is the session list.
 export const tabs = [
-  { href: "/", label: "Status", icon: Activity },
-  { href: "/models", label: "Models", icon: Boxes },
+  { href: "/", label: "Status", icon: StatusIcon },
+  { href: "/models", label: "Models", icon: ModelsIcon },
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/agent/automations", label: "Automations", icon: Clock },
-  { href: "/configure", label: "Configure", icon: ServerCog },
-  { href: "/usage", label: "Usage", icon: TrendingUp },
+  { href: "/agent/automations", label: "Automations", icon: AutomationsIcon },
+  { href: "/configure", label: "Configure", icon: ConfigureIcon },
+  { href: "/usage", label: "Usage", icon: UsageIcon },
 ];
 
 export function mobilePageTitle(pathname: string): string {
