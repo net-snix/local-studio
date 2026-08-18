@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -25,9 +25,20 @@ export function configuredGitRoots(): string[] {
 
 export function resolveGitCwd(input: string, roots = configuredGitRoots()): string | null {
   if (!path.isAbsolute(input)) return null;
-  const candidate = path.resolve(input);
+  let candidate: string;
+  try {
+    candidate = realpathSync(path.resolve(input));
+  } catch {
+    return null;
+  }
   return roots.some((root) => {
-    const relative = path.relative(root, candidate);
+    let canonicalRoot: string;
+    try {
+      canonicalRoot = realpathSync(path.resolve(root));
+    } catch {
+      return false;
+    }
+    const relative = path.relative(canonicalRoot, candidate);
     return (
       relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
     );
@@ -42,9 +53,13 @@ export function assertGitCwd(
   const requested = input?.trim();
   if (!requested) return { error: Response.json({ error: "cwd is required" }, { status: 400 }) };
   const cwd = resolveGitCwd(requested);
-  if (!cwd) return { error: Response.json({ error: "cwd must be absolute" }, { status: 400 }) };
-  if (!existsSync(cwd))
-    return { error: Response.json({ error: "cwd not found" }, { status: 404 }) };
+  if (!cwd)
+    return {
+      error: Response.json(
+        { error: "cwd must be an existing directory within a configured Git root" },
+        { status: 400 },
+      ),
+    };
   return { cwd };
 }
 
