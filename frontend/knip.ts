@@ -5,9 +5,10 @@ const config = {
     "desktop/preload.ts",
     "desktop/app-identity.ts",
     "desktop/resources/pi-extensions/*.ts",
+    "src/**/*.test.{ts,tsx}",
   ],
   project: ["src/**/*.{ts,tsx}", "desktop/**/*.{ts,tsx}"],
-  ignore: [".next/**", "node_modules/**"],
+  ignore: [".next/**", ".next-dev/**", "node_modules/**"],
   ignoreIssues: {
     "desktop/interfaces.ts": ["types"],
   },
