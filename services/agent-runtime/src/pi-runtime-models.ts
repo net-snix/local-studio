@@ -214,23 +214,37 @@ function normalizeControllerInput(input: PiControllerModelsRequest): PiControlle
   };
 }
 
-function mergeControllers(
+export function mergeControllers(
   settings: ApiSettings,
   requested: PiControllerModelsRequest[] = [],
 ): PiControllerConfig[] {
-  const requestedControllers = requested
-    .map(normalizeControllerInput)
-    .filter((controller): controller is PiControllerConfig => controller !== null);
-  if (requestedControllers.length > 0) {
-    return [
-      ...new Map(requestedControllers.map((controller) => [controller.url, controller])).values(),
-    ];
-  }
   const primary = normalizeControllerInput({
     url: settings.backendUrl,
     apiKey: settings.apiKey,
     name: "primary",
   });
+  const requestedControllers = requested
+    .map(normalizeControllerInput)
+    .filter((controller): controller is PiControllerConfig => controller !== null);
+  if (requestedControllers.length > 0) {
+    // The browser and controllers.json both cache credentials. If the primary
+    // controller key rotates, those stale copies must not hide every live model
+    // and leave only unrelated user-Pi entries in the picker. Server settings
+    // are authoritative for their exact backend URL; other controllers retain
+    // the credentials supplied by the browser.
+    const reconciled = requestedControllers.map((controller) =>
+      primary && controller.url === primary.url
+        ? {
+            ...controller,
+            apiKey: primary.apiKey || controller.apiKey,
+            name: controller.name ?? primary.name,
+          }
+        : controller,
+    );
+    return [
+      ...new Map(reconciled.map((controller) => [controller.url, controller])).values(),
+    ];
+  }
   return primary ? [primary] : [];
 }
 
