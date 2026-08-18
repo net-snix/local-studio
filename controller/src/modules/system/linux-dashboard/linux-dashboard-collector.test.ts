@@ -4,7 +4,9 @@ import {
   parseCpuInfoIdentity,
   parseCpuPowerSampleTtl,
   parseDashboardServicePort,
+  parseTurbostatPackagePower,
   readCpuEnergyHelperSample,
+  readCpuPowerTurbostat,
 } from "./linux-dashboard-collector";
 import { parseDiskTargets } from "./linux-dashboard-disks";
 
@@ -107,6 +109,56 @@ describe("linux dashboard CPU power helper", () => {
       { command: process.execPath, args: [] },
       { command: "sudo", args: ["-n", process.execPath] },
     ]);
+  });
+
+  it("parses package power from turbostat output", () => {
+    expect(parseTurbostatPackagePower("PkgWatt\n52.72\n")).toBe(52.7);
+    expect(parseTurbostatPackagePower("Busy% Bzy_MHz PkgWatt\n0.54 3930 52.72\n")).toBe(
+      52.7,
+    );
+    expect(parseTurbostatPackagePower("PkgWatt\nnot-a-number\n")).toBeNull();
+  });
+
+  it("reads turbostat directly when it has permission", () => {
+    const calls: Array<{ command: string; args: string[]; timeoutMs: number }> = [];
+    const power = readCpuPowerTurbostat((command, args, timeoutMs) => {
+      calls.push({ command, args, timeoutMs });
+      return { status: 0, stdout: "PkgWatt\n52.72\n", stderr: "" };
+    }, process.execPath);
+
+    expect(power).toBe(52.7);
+    expect(calls).toEqual([
+      {
+        command: process.execPath,
+        args: [
+          "--quiet",
+          "--Summary",
+          "--show",
+          "PkgWatt",
+          "--interval",
+          "0.1",
+          "--num_iterations",
+          "1",
+        ],
+        timeoutMs: 1500,
+      },
+    ]);
+  });
+
+  it("falls back to passwordless sudo for turbostat package power", () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const power = readCpuPowerTurbostat((command, args) => {
+      calls.push({ command, args });
+      return calls.length === 1
+        ? { status: 1, stdout: "", stderr: "permission denied" }
+        : { status: 0, stdout: "PkgWatt\n61.25\n", stderr: "" };
+    }, process.execPath);
+
+    expect(power).toBe(61.3);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.command).toBe(process.execPath);
+    expect(calls[1]?.command).toBe("sudo");
+    expect(calls[1]?.args.slice(0, 2)).toEqual(["-n", process.execPath]);
   });
 });
 

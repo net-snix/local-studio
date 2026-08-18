@@ -50,7 +50,7 @@ const runDashboardCommand: DashboardCommandRunner = (command, args, timeoutMs) =
   realProcessRunner.runSync(command, args, { timeoutMs });
 
 const SLOW_SNAPSHOT_TTL_MS = 30_000;
-const DEFAULT_CPU_POWER_SAMPLE_TTL_MS = 60_000;
+const DEFAULT_CPU_POWER_SAMPLE_TTL_MS = 5_000;
 export const parseCpuPowerSampleTtl = (value: string | undefined, fallback: number): number => {
   if (!value) return fallback;
   const parsed = Number(value);
@@ -63,6 +63,9 @@ const CPU_POWER_SAMPLE_TTL_MS = parseCpuPowerSampleTtl(
 const CPU_ENERGY_HELPER =
   process.env["LOCAL_STUDIO_DASHBOARD_CPU_ENERGY_HELPER"] ??
   "/usr/local/libexec/local-studio/read-cpu-energy";
+const CPU_POWER_TURBOSTAT =
+  process.env["LOCAL_STUDIO_DASHBOARD_CPU_POWER_TURBOSTAT"] ?? "/usr/bin/turbostat";
+const TURBOSTAT_SAMPLE_INTERVAL_SECONDS = "0.1";
 
 type CpuSample = {
   idle: number;
@@ -213,6 +216,49 @@ export const parseCpuEnergyHelperOutput = (output: string): CpuEnergySample | nu
   };
 };
 
+export const parseTurbostatPackagePower = (output: string): number | null => {
+  const rows = output
+    .split(/\r?\n/)
+    .map((row) => row.trim())
+    .filter(Boolean);
+
+  for (const [index, row] of rows.entries()) {
+    const headers = row.split(/\s+/);
+    const packagePowerIndex = headers.indexOf("PkgWatt");
+    if (packagePowerIndex === -1) continue;
+
+    for (const valueRow of rows.slice(index + 1)) {
+      const value = toNumber(valueRow.split(/\s+/)[packagePowerIndex]);
+      if (value !== null && value >= 0) return roundOne(value);
+    }
+  }
+
+  return null;
+};
+
+export const readCpuPowerTurbostat = (
+  commandRunner: DashboardCommandRunner = runDashboardCommand,
+  turbostatPath: string = CPU_POWER_TURBOSTAT,
+): number | null => {
+  if (!existsSync(turbostatPath)) return null;
+  const args = [
+    "--quiet",
+    "--Summary",
+    "--show",
+    "PkgWatt",
+    "--interval",
+    TURBOSTAT_SAMPLE_INTERVAL_SECONDS,
+    "--num_iterations",
+    "1",
+  ];
+  const directResult = commandRunner(turbostatPath, args, 1_500);
+  if (directResult.status === 0) return parseTurbostatPackagePower(directResult.stdout);
+
+  const sudoResult = commandRunner("sudo", ["-n", turbostatPath, ...args], 1_500);
+  if (sudoResult.status !== 0) return null;
+  return parseTurbostatPackagePower(sudoResult.stdout);
+};
+
 const calculateCpuPowerWatts = (
   first: CpuEnergySample | null,
   second: CpuEnergySample | null,
@@ -242,14 +288,11 @@ const collectCpuPowerWatts = (): number | null => {
   }
 
   const sample = readCpuEnergySample();
-  if (!sample) {
-    cpuEnergyCache = { sample: null, collectedAt: now, powerDrawWatts: null };
-    return null;
-  }
-
-  const powerDrawWatts = cpuEnergyCache?.sample
-    ? calculateCpuPowerWatts(cpuEnergyCache.sample, sample, now - cpuEnergyCache.collectedAt)
-    : null;
+  const energyPowerWatts =
+    sample && cpuEnergyCache?.sample
+      ? calculateCpuPowerWatts(cpuEnergyCache.sample, sample, now - cpuEnergyCache.collectedAt)
+      : null;
+  const powerDrawWatts = energyPowerWatts ?? readCpuPowerTurbostat();
   cpuEnergyCache = { sample, collectedAt: now, powerDrawWatts };
   return powerDrawWatts;
 };
