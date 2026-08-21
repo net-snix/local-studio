@@ -47,12 +47,31 @@ export const parseLactGpuList = (stdout: string): LactGpuEntry[] =>
     })
     .filter((entry): entry is LactGpuEntry => entry !== null && Number.isFinite(entry.lactIndex));
 
-export const parseLactVramTemperature = (stdout: string): number | null => {
+const parseAggregateVramTemperature = (stdout: string): number | null => {
   const match = stdout.match(/\bVRAM:\s*(-?\d+(?:\.\d+)?)\s*°?\s*C\b/i);
   if (!match?.[1]) return null;
   const value = Number(match[1]);
   return Number.isFinite(value) ? value : null;
 };
+
+// Some cards expose no aggregate "VRAM:" reading and only the per-chip
+// sensors. The RTX PRO 6000 Blackwell Max-Q is one: LACT reports all 32 GDDR7
+// chips (A0..H1, front and back) but no roll-up, so reading only the aggregate
+// left that card showing no VRAM temperature beside cards that had one.
+// Fall back to the hottest chip, which is the value worth acting on.
+const parsePerChipVramTemperature = (stdout: string): number | null => {
+  const values: number[] = [];
+  for (const match of stdout.matchAll(
+    /\bVRAM Chip\b[^:]*:\s*(-?\d+(?:\.\d+)?)\s*°?\s*C\b/gi,
+  )) {
+    const value = Number(match[1]);
+    if (Number.isFinite(value)) values.push(value);
+  }
+  return values.length > 0 ? Math.max(...values) : null;
+};
+
+export const parseLactVramTemperature = (stdout: string): number | null =>
+  parseAggregateVramTemperature(stdout) ?? parsePerChipVramTemperature(stdout);
 
 const commandFailureReason = (prefix: string, stderr: string, stdout: string): string => {
   const detail = stderr.trim() || stdout.trim();
