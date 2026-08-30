@@ -24,6 +24,8 @@ const NVIDIA_SMI_GPU_FIELDS = [
   "temperature.gpu",
   "power.draw",
   "power.limit",
+  "temperature.memory",
+  "fan.speed",
 ] as const;
 
 const NVIDIA_SMI_SNAPSHOT_QUERY = [...NVIDIA_SMI_GPU_FIELDS, "driver_version"].join(",");
@@ -33,7 +35,12 @@ const NVIDIA_SMI_ARGS = [
 ];
 const NVIDIA_SMI_TIMEOUT_MS = 5_000;
 
-const parseNvidiaSmiGpuLine = (line: string, index: number): GpuInfo => {
+export type NvidiaGpuSample = GpuInfo & {
+  memory_temp_c: number | null;
+  fan_percent: number | null;
+};
+
+const parseNvidiaSmiGpuLine = (line: string, index: number): NvidiaGpuSample => {
   const parts = line.split(",").map((value) => value.trim());
   const [
     rawUuid,
@@ -46,6 +53,8 @@ const parseNvidiaSmiGpuLine = (line: string, index: number): GpuInfo => {
     temperature,
     powerDraw,
     powerLimit,
+    memoryTemperature,
+    fanSpeed,
   ] = parts;
   const name = rawName ?? "Unknown";
   const identity = (value: string | undefined): string | undefined => {
@@ -68,6 +77,11 @@ const parseNvidiaSmiGpuLine = (line: string, index: number): GpuInfo => {
   const memoryTotalMb = reportedTotalMb || fallbackTotalMb;
   const memoryUsedMb = toMb(memoryUsed) || fallbackUsedMb;
   const memoryFreeMb = toMb(memoryFree) || fallbackFreeMb;
+  const toNullableNumber = (value: string | undefined): number | null => {
+    if (!identity(value)) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
   return {
     ...(uuid ? { uuid } : {}),
     ...(pciBusId ? { pci_bus_id: pciBusId } : {}),
@@ -80,6 +94,8 @@ const parseNvidiaSmiGpuLine = (line: string, index: number): GpuInfo => {
     temp_c: toFiniteNumber(temperature),
     power_draw: toFiniteNumber(powerDraw),
     power_limit: toFiniteNumber(powerLimit),
+    memory_temp_c: toNullableNumber(memoryTemperature),
+    fan_percent: toNullableNumber(fanSpeed),
   };
 };
 
@@ -90,7 +106,7 @@ const splitSmiLines = (stdout: string): string[] =>
     .map((line) => line.trim())
     .filter(Boolean);
 
-const parseNvidiaSmiGpuOutput = (stdout: string): GpuInfo[] =>
+const parseNvidiaSmiGpuOutput = (stdout: string): NvidiaGpuSample[] =>
   splitSmiLines(stdout).map(parseNvidiaSmiGpuLine);
 
 const parseNvidiaSmiDriverVersion = (stdout: string): string | null => {
@@ -102,7 +118,7 @@ const parseNvidiaSmiDriverVersion = (stdout: string): string | null => {
 
 export type NvidiaSmiSnapshot = {
   available: boolean;
-  gpus: GpuInfo[];
+  gpus: NvidiaGpuSample[];
   driverVersion: string | null;
 };
 
@@ -126,8 +142,29 @@ export const queryNvidiaSmiSnapshot = (): Effect.Effect<NvidiaSmiSnapshot | null
   );
 };
 
+// One nvidia-smi subprocess feeds every consumer (5s metrics collector, 1s dashboard
+// telemetry loop, launch preflights) through this cache; per-call maxAgeMs decides
+// how stale a shared sample each caller tolerates.
+const NVIDIA_SNAPSHOT_DEFAULT_MAX_AGE_MS = 2_000;
+let nvidiaSnapshotCache: { snapshot: NvidiaSmiSnapshot | null; at: number } | null = null;
+
+export const queryNvidiaSmiSnapshotCached = (
+  maxAgeMs = NVIDIA_SNAPSHOT_DEFAULT_MAX_AGE_MS,
+): Effect.Effect<NvidiaSmiSnapshot | null> =>
+  Effect.suspend(() => {
+    const cached = nvidiaSnapshotCache;
+    if (cached && Date.now() - cached.at < maxAgeMs) return Effect.succeed(cached.snapshot);
+    return queryNvidiaSmiSnapshot().pipe(
+      Effect.tap((snapshot) =>
+        Effect.sync(() => {
+          nvidiaSnapshotCache = { snapshot, at: Date.now() };
+        }),
+      ),
+    );
+  });
+
 export const getGpuInfoFromNvidiaSmi = (): Effect.Effect<GpuInfo[]> =>
-  queryNvidiaSmiSnapshot().pipe(Effect.map((snapshot) => snapshot?.gpus ?? []));
+  queryNvidiaSmiSnapshotCached().pipe(Effect.map((snapshot) => snapshot?.gpus ?? []));
 
 export const detectGpuMonitoringTool = (): Effect.Effect<RuntimeGpuMonitoringTool | null> =>
   Effect.gen(function* () {

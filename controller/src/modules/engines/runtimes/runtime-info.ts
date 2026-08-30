@@ -13,7 +13,7 @@ import type {
 } from "../../models/types";
 import type { Config } from "../../../config/env";
 import { resolveBinary, runCommandEffect, runCommandAsyncEffect } from "../../../core/command";
-import { getGpuInfo, queryNvidiaSmiSnapshot } from "../../system/platform/gpu";
+import { getGpuInfo, queryNvidiaSmiSnapshotCached } from "../../system/platform/gpu";
 import { extractCudaVersion } from "./cuda-version";
 import { getVllmRuntimeInfo } from "./vllm-runtime";
 import { probeGpuMonitoring } from "../../system/platform/compatibility-report";
@@ -91,7 +91,7 @@ const computeSystemRuntimeInfo = (
     const [nvidiaSnapshot, vllmInfo, sglangInfo, llamaInfo, mlxInfo, torch, detectedGpus] =
       yield* Effect.all(
         [
-          nvidiaAllowed && hasNvidiaSmi ? queryNvidiaSmiSnapshot() : Effect.succeed(null),
+          nvidiaAllowed && hasNvidiaSmi ? queryNvidiaSmiSnapshotCached() : Effect.succeed(null),
           Fiber.join(vllmFiber),
           getEngineSpec("sglang").getRuntimeInfo!(config, runningProcess),
           getEngineSpec("llamacpp").getRuntimeInfo!(config, runningProcess),

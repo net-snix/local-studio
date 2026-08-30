@@ -5,8 +5,7 @@ import { basename, join } from "node:path";
 import { Effect } from "effect";
 import type { AppContext } from "../../../app-context";
 import { realProcessRunner, type CommandResult } from "../../../core/command";
-import { getGpuInfo } from "../platform/gpu";
-import { resolveNvidiaSmiBinary } from "../platform/smi-tools";
+import { getGpuInfo, queryNvidiaSmiSnapshotCached, type NvidiaGpuSample } from "../platform/gpu";
 import { collectDisks } from "./linux-dashboard-disks";
 import { collectLactMemoryTemperatures, normalizePciBusId } from "./linux-dashboard-lact";
 import type {
@@ -126,20 +125,23 @@ export const parseCpuInfoIdentity = (
   };
 };
 
+// CPU identity is static hardware; parse /proc/cpuinfo once, not on every 1s tick.
+let cpuIdentityCache: CpuIdentity | null = null;
+
 const collectCpuIdentity = (): CpuIdentity => {
+  if (cpuIdentityCache) return cpuIdentityCache;
   const cpuList = cpus();
   const threads = cpuList.length || 1;
   const fallbackModel = cpuList.find((cpu) => cpu.model.trim())?.model.trim() || null;
   const cpuinfo = readText("/proc/cpuinfo");
-  if (!cpuinfo) {
-    return {
-      model: fallbackModel,
-      physicalCores: threads,
-      threads,
-    };
-  }
-
-  return parseCpuInfoIdentity(cpuinfo, fallbackModel, threads);
+  cpuIdentityCache = cpuinfo
+    ? parseCpuInfoIdentity(cpuinfo, fallbackModel, threads)
+    : {
+        model: fallbackModel,
+        physicalCores: threads,
+        threads,
+      };
+  return cpuIdentityCache;
 };
 
 const readCpuSample = (): CpuSample | null => {
@@ -358,91 +360,70 @@ const parseMemInfo = (): LinuxDashboardSnapshot["memory"] => {
   };
 };
 
-const collectNvidiaGpus = (): DashboardGpu[] => {
-  const nvidiaSmi = resolveNvidiaSmiBinary();
-  if (!nvidiaSmi) return [];
-  const query = [
-    "index",
-    "name",
-    "uuid",
-    "pci.bus_id",
-    "utilization.gpu",
-    "memory.total",
-    "memory.used",
-    "temperature.gpu",
-    "temperature.memory",
-    "fan.speed",
-    "power.draw",
-    "power.limit",
-  ].join(",");
-  const result = runDashboardCommand(
-    nvidiaSmi,
-    [`--query-gpu=${query}`, "--format=csv,noheader,nounits"],
-    5_000,
-  );
-  if (result.status !== 0 || !result.stdout) return [];
+// GPU rows come from the shared cached nvidia-smi sampler in platform/gpu.ts, so the
+// 1s telemetry loop and the 5s metrics collector share one subprocess instead of
+// spawning their own (the old path here was also synchronous and blocked the runtime).
+const NVIDIA_SNAPSHOT_MAX_AGE_MS = 900;
 
-  const rows = result.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const parsedRows = rows.map((line, fallbackIndex) => ({
-    parts: line.split(",").map((part) => part.trim()),
-    fallbackIndex,
-  }));
-  const needsLactFallback = parsedRows.some(({ parts }) => toNumber(parts[8]) === null);
-  const lactMemoryTemperatures = needsLactFallback ? collectLactMemoryTemperatures() : null;
-
-  return parsedRows.map(({ parts, fallbackIndex }) => {
-    const totalMb = toNumber(parts[5]) ?? 0;
-    const usedMb = toNumber(parts[6]) ?? 0;
-    const totalBytes = totalMb * 1024 * 1024;
-    const usedBytes = usedMb * 1024 * 1024;
-    const temperature = toNumber(parts[7]);
-    const nvidiaMemoryTemperature = toNumber(parts[8]);
-    const normalizedPciBusId = normalizePciBusId(parts[3]);
-    const lactMemoryTemperature =
-      nvidiaMemoryTemperature === null && normalizedPciBusId && lactMemoryTemperatures
-        ? lactMemoryTemperatures.byPciBus.get(normalizedPciBusId)
-        : undefined;
-    const memoryTemperature = nvidiaMemoryTemperature ?? lactMemoryTemperature?.value ?? null;
-    const memoryTemperatureUnavailableReason =
-      memoryTemperature === null
-        ? [
-            "NVIDIA SMI reported N/A.",
-            lactMemoryTemperatures?.unavailableReason ??
-              lactMemoryTemperature?.unavailableReason ??
-              "LACT did not report this GPU.",
-          ].join(" ")
-        : null;
-    const memoryPercent = totalBytes > 0 ? roundOne((usedBytes / totalBytes) * 100) : null;
-    let status: LinuxDashboardHealth = "ok";
-    if ((temperature ?? 0) >= 88 || (memoryPercent ?? 0) >= 98) status = "critical";
-    else if ((temperature ?? 0) >= 82 || (memoryPercent ?? 0) >= 95) status = "warning";
-
-    return {
-      index: toNumber(parts[0]) ?? fallbackIndex,
-      name: parts[1] || "NVIDIA GPU",
-      uuid: parts[2] || null,
-      pci_bus_id: parts[3] || null,
-      utilization_percent: toNumber(parts[4]),
-      memory_total_bytes: totalBytes,
-      memory_used_bytes: usedBytes,
-      memory_used_percent: memoryPercent,
-      temperature_c: temperature,
-      memory_temperature_c: memoryTemperature,
-      memory_temperature_unavailable_reason: memoryTemperatureUnavailableReason,
-      fan_percent: toNumber(parts[9]),
-      power_draw_watts: toNumber(parts[10]),
-      power_limit_watts: toNumber(parts[11]),
-      status,
-    };
+const collectNvidiaGpus = (): Effect.Effect<DashboardGpu[]> =>
+  Effect.gen(function* () {
+    const snapshot = yield* queryNvidiaSmiSnapshotCached(NVIDIA_SNAPSHOT_MAX_AGE_MS);
+    const samples = snapshot?.gpus ?? [];
+    if (samples.length === 0) return [];
+    const needsLactFallback = samples.some((sample) => sample.memory_temp_c === null);
+    const lactMemoryTemperatures = needsLactFallback ? collectLactMemoryTemperatures() : null;
+    return samples.map((sample) => toDashboardGpu(sample, lactMemoryTemperatures));
   });
+
+const toDashboardGpu = (
+  sample: NvidiaGpuSample,
+  lactMemoryTemperatures: ReturnType<typeof collectLactMemoryTemperatures> | null,
+): DashboardGpu => {
+  const totalBytes = sample.memory_total_mb * 1024 * 1024;
+  const usedBytes = sample.memory_used_mb * 1024 * 1024;
+  const temperature = sample.temp_c > 0 ? sample.temp_c : null;
+  const normalizedPciBusId = normalizePciBusId(sample.pci_bus_id ?? undefined);
+  const lactMemoryTemperature =
+    sample.memory_temp_c === null && normalizedPciBusId && lactMemoryTemperatures
+      ? lactMemoryTemperatures.byPciBus.get(normalizedPciBusId)
+      : undefined;
+  const memoryTemperature = sample.memory_temp_c ?? lactMemoryTemperature?.value ?? null;
+  const memoryTemperatureUnavailableReason =
+    memoryTemperature === null
+      ? [
+          "NVIDIA SMI reported N/A.",
+          lactMemoryTemperatures?.unavailableReason ??
+            lactMemoryTemperature?.unavailableReason ??
+            "LACT did not report this GPU.",
+        ].join(" ")
+      : null;
+  const memoryPercent = totalBytes > 0 ? roundOne((usedBytes / totalBytes) * 100) : null;
+  let status: LinuxDashboardHealth = "ok";
+  if ((temperature ?? 0) >= 88 || (memoryPercent ?? 0) >= 98) status = "critical";
+  else if ((temperature ?? 0) >= 82 || (memoryPercent ?? 0) >= 95) status = "warning";
+
+  return {
+    index: sample.index,
+    name: sample.name || "NVIDIA GPU",
+    uuid: sample.uuid ?? null,
+    pci_bus_id: sample.pci_bus_id ?? null,
+    utilization_percent: sample.utilization_pct,
+    memory_total_bytes: totalBytes,
+    memory_used_bytes: usedBytes,
+    memory_used_percent: memoryPercent,
+    temperature_c: temperature,
+    memory_temperature_c: memoryTemperature,
+    memory_temperature_unavailable_reason: memoryTemperatureUnavailableReason,
+    fan_percent: sample.fan_percent,
+    power_draw_watts: sample.power_draw > 0 ? sample.power_draw : null,
+    power_limit_watts: sample.power_limit > 0 ? sample.power_limit : null,
+    status,
+  };
 };
 
 const collectGpus = (): Effect.Effect<DashboardGpu[]> =>
   Effect.gen(function* () {
-    const nvidia = collectNvidiaGpus();
+    const nvidia = yield* collectNvidiaGpus();
     if (nvidia.length > 0) return nvidia;
 
     const gpuInfo = yield* getGpuInfo();

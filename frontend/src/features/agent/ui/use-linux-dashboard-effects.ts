@@ -85,7 +85,10 @@ export function useLinuxDashboardEffects({
       };
 
       const connect = async (): Promise<void> => {
-        if (disposed || streamAbort) return;
+        // A hidden tab pauses the stream entirely: the controller stops its 1s
+        // collection loop when the last subscriber drops, and the activity handler
+        // reconnects on visibility/focus.
+        if (disposed || streamAbort || document.visibilityState === "hidden") return;
         const abort = new AbortController();
         streamAbort = abort;
         try {
@@ -143,11 +146,16 @@ export function useLinuxDashboardEffects({
       };
 
       const unsubscribeActivity = subscribeLinuxDashboardActivity(document, window, recoverIfStale);
+      const onVisibilityPause = (): void => {
+        if (document.visibilityState === "hidden") disconnect();
+      };
+      document.addEventListener("visibilitychange", onVisibilityPause);
 
       void connect();
 
       return () => {
         disposed = true;
+        document.removeEventListener("visibilitychange", onVisibilityPause);
         unsubscribeActivity();
         disconnect();
       };
