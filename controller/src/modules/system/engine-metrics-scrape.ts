@@ -19,10 +19,21 @@ const emptyScrape = (): EngineScrape => ({
   hasLlamacpp: false,
 });
 
-const parseEngineMetrics = (status: number, text: string): EngineScrape => {
+// Counters (and running/waiting request gauges) sum across label sets so multi-engine
+// expositions (vLLM data-parallel emits one series per engine="N") keep whole totals;
+// remaining duplicates average, which is the only sane combine for percent-type gauges.
+const isSummableMetric = (name: string): boolean =>
+  /_(?:total|sum|count|bucket)$/.test(name) ||
+  /(?:num_requests_running|num_requests_waiting|num_running_reqs|num_queue_reqs|num_pending_reqs|requests_processing|requests_deferred)$/.test(
+    name,
+  );
+
+export const parseEngineMetrics = (status: number, text: string): EngineScrape => {
   const scrape = emptyScrape();
   scrape.status = status;
   if (status !== 200) return scrape;
+  const sums: Record<string, number> = {};
+  const seriesCounts: Record<string, number> = {};
   for (const line of text.split("\n")) {
     if (line.startsWith("#") || line.trim().length === 0) continue;
     if (!scrape.hasVllm && line.startsWith("vllm:")) scrape.hasVllm = true;
@@ -35,7 +46,13 @@ const parseEngineMetrics = (status: number, text: string): EngineScrape => {
     const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)\{?[^}]*\}?\s+([\d.eE+-]+)$/);
     if (!match?.[1] || !match[2]) continue;
     const value = Number(match[2]);
-    if (Number.isFinite(value)) scrape.metrics[match[1]] = value;
+    if (!Number.isFinite(value)) continue;
+    sums[match[1]] = (sums[match[1]] ?? 0) + value;
+    seriesCounts[match[1]] = (seriesCounts[match[1]] ?? 0) + 1;
+  }
+  for (const [name, sum] of Object.entries(sums)) {
+    const count = seriesCounts[name] ?? 1;
+    scrape.metrics[name] = count > 1 && !isSummableMetric(name) ? sum / count : sum;
   }
   return scrape;
 };

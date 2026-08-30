@@ -132,7 +132,7 @@ function RuntimeMetricStrip({
       <MetricCell
         label="Prefill"
         value={runtime.prefill ?? "0"}
-        unit={runtime.prefill ? "t/s" : undefined}
+        unit={runtime.prefill ? "tok/s" : undefined}
         detail={runtime.prefillPeak}
       />
       <MetricCell label="Requests" value={runtime.requests ?? "—"} />

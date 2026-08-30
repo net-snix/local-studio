@@ -93,47 +93,44 @@ const buildCurrentMetrics = (
     const promptTokensTotal = firstMetric(prometheus, names.promptTokens);
     const generationTokensTotal = firstMetric(prometheus, names.generationTokens);
 
-    const hasDirectThroughput = observation.metricsBackend !== "vllm";
-    let promptThroughput = hasDirectThroughput
-      ? firstMetric(prometheus, names.promptThroughput)
-      : 0;
-    let generationThroughput = hasDirectThroughput
-      ? firstMetric(prometheus, names.generationThroughput)
-      : 0;
-    if (observation.metricsBackend === "vllm") {
-      const nowMs = Date.now();
-      const previous = throughputSamples.get(modelId);
-      if (previous && nowMs - previous.ts >= MIN_RATE_INTERVAL_MS) {
-        const elapsedSeconds = (nowMs - previous.ts) / 1000;
-        promptThroughput = counterRatePerSecond(
-          promptTokensTotal,
-          previous.promptTokens,
-          elapsedSeconds,
-        );
-        generationThroughput = counterRatePerSecond(
-          generationTokensTotal,
-          previous.genTokens,
-          elapsedSeconds,
-        );
-        throughputSamples.set(modelId, {
-          promptTokens: promptTokensTotal,
-          genTokens: generationTokensTotal,
-          ts: nowMs,
-          promptTps: promptThroughput,
-          genTps: generationThroughput,
-        });
-      } else if (previous) {
-        promptThroughput = previous.promptTps;
-        generationThroughput = previous.genTps;
-      } else {
-        throughputSamples.set(modelId, {
-          promptTokens: promptTokensTotal,
-          genTokens: generationTokensTotal,
-          ts: nowMs,
-          promptTps: 0,
-          genTps: 0,
-        });
-      }
+    // Counter deltas for every backend; engine throughput gauges are only the
+    // no-previous-sample fallback (SGLang's freeze at their last value while idle).
+    const nowMs = Date.now();
+    const previous = throughputSamples.get(modelId);
+    let promptThroughput: number;
+    let generationThroughput: number;
+    if (previous && nowMs - previous.ts >= MIN_RATE_INTERVAL_MS) {
+      const elapsedSeconds = (nowMs - previous.ts) / 1000;
+      promptThroughput = counterRatePerSecond(
+        promptTokensTotal,
+        previous.promptTokens,
+        elapsedSeconds,
+      );
+      generationThroughput = counterRatePerSecond(
+        generationTokensTotal,
+        previous.genTokens,
+        elapsedSeconds,
+      );
+      throughputSamples.set(modelId, {
+        promptTokens: promptTokensTotal,
+        genTokens: generationTokensTotal,
+        ts: nowMs,
+        promptTps: promptThroughput,
+        genTps: generationThroughput,
+      });
+    } else if (previous) {
+      promptThroughput = previous.promptTps;
+      generationThroughput = previous.genTps;
+    } else {
+      promptThroughput = firstMetric(prometheus, names.promptThroughput);
+      generationThroughput = firstMetric(prometheus, names.generationThroughput);
+      throughputSamples.set(modelId, {
+        promptTokens: promptTokensTotal,
+        genTokens: generationTokensTotal,
+        ts: nowMs,
+        promptTps: promptThroughput,
+        genTps: generationThroughput,
+      });
     }
     const avgTtftMs = cumulativeTtftMs(prometheus, names);
     const peakData = yield* context.stores.peakMetricsStore.getEffect(modelId);
@@ -170,6 +167,11 @@ const buildCurrentMetrics = (
   });
 
 const PEAK_METRICS_CACHE_TTL_MS = 15_000;
+// The metrics collector publishes a full snapshot every 5s; serve that instead of
+// rebuilding (and re-scraping the engine + GPUs) per request. Rebuilding is only the
+// cold-start fallback, and its payload merges over the collector's so session_peak_*
+// fields are not stripped from the SSE stream by a shape with fewer fields.
+const LATEST_METRICS_FRESH_MS = 10_000;
 
 export const registerMonitoringRoutes = defineRoutes((app, context) => {
   type PeakMetricsBody = Record<string, unknown> | { metrics: Array<Record<string, unknown>> };
@@ -181,11 +183,22 @@ export const registerMonitoringRoutes = defineRoutes((app, context) => {
       documentRoute,
       effectHandler((ctx) =>
         Effect.gen(function* () {
+          const latest = context.eventManager.getLatestMetrics();
+          if (
+            Object.keys(latest).length > 0 &&
+            context.eventManager.latestMetricsAgeMs() < LATEST_METRICS_FRESH_MS
+          ) {
+            return ctx.json(latest);
+          }
           const current = yield* buildCurrentMetrics(context).pipe(
+            Effect.map((metrics) =>
+              latest["model_id"] && latest["model_id"] === metrics["model_id"]
+                ? { ...latest, ...metrics }
+                : metrics,
+            ),
             Effect.tap((metrics) => context.eventManager.publishMetrics(metrics)),
             Effect.catch((error) => {
               context.logger.warn(`Failed to build current metrics: ${(error as Error).message}`);
-              const latest = context.eventManager.getLatestMetrics();
               return Object.keys(latest).length > 0 ? Effect.succeed(latest) : Effect.fail(error);
             }),
           );

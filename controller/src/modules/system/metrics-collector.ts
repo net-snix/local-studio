@@ -32,6 +32,7 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
   let sessionModelId: string | null = null;
   let sessionPeakId: string | null = null;
   let sessionPeaks: SessionPeaks = emptyPeaks();
+  let recentTtftMs = 0;
 
   const collect = Effect.gen(function* () {
     const current = yield* context.bridge.findInferenceProcess();
@@ -122,6 +123,7 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
         sessionPeaks = emptyPeaks();
         lastEngineMetrics = {};
         lastMetricsTime = 0;
+        recentTtftMs = 0;
       }
 
       let promptThroughput = 0;
@@ -140,11 +142,14 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
         const elapsed =
           lastMetricsTime > 0 ? now - lastMetricsTime : METRICS_LIFETIME_UPTIME_INCREMENT_SECONDS;
         const names = metricNamesForBackend(observation.metricsBackend);
-        if (
+        const hasCounterWindow =
           elapsed > 0 &&
           Object.keys(engineMetrics).length > 0 &&
-          Object.keys(lastEngineMetrics).length > 0
-        ) {
+          Object.keys(lastEngineMetrics).length > 0;
+        if (hasCounterWindow) {
+          // Counter deltas over the collect window are the live rate. Engine throughput
+          // gauges are only a first-tick fallback: SGLang's freeze at their last value
+          // while idle, which reads as phantom decode on the dashboard.
           const previousPromptTokens = firstMetric(lastEngineMetrics, names.promptTokens);
           const currentPromptTokens = firstMetric(engineMetrics, names.promptTokens);
           const previousGenerationTokens = firstMetric(lastEngineMetrics, names.generationTokens);
@@ -159,11 +164,10 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
             previousGenerationTokens,
             elapsed,
           );
+        } else {
+          promptThroughput = firstMetric(engineMetrics, names.promptThroughput);
+          generationThroughput = firstMetric(engineMetrics, names.generationThroughput);
         }
-
-        promptThroughput = firstMetric(engineMetrics, names.promptThroughput) || promptThroughput;
-        generationThroughput =
-          firstMetric(engineMetrics, names.generationThroughput) || generationThroughput;
 
         runningRequests = firstMetric(engineMetrics, names.runningRequests);
         pendingRequests = firstMetric(engineMetrics, names.pendingRequests);
@@ -172,6 +176,7 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
         generationTokensTotal = firstMetric(engineMetrics, names.generationTokens);
         avgTtftMs = cumulativeTtftMs(engineMetrics, names);
         intervalTtft = intervalTtftMs(engineMetrics, lastEngineMetrics, names);
+        if (intervalTtft > 0) recentTtftMs = intervalTtft;
 
         lastEngineMetrics = engineMetrics;
         lastMetricsTime = now;
@@ -240,6 +245,7 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
         prompt_throughput: Math.round(promptThroughput * 10) / 10,
         generation_throughput: Math.round(generationThroughput * 10) / 10,
         avg_ttft_ms: avgTtftDisplay,
+        recent_ttft_ms: recentTtftMs > 0 ? Math.round(recentTtftMs * 10) / 10 : undefined,
         latency_avg: usageLatencyAvg,
         vram_used_gb: Math.round(totalVramUsedGb * 10) / 10,
         vram_capacity_gb: Math.round(totalVramCapacityGb * 10) / 10,
@@ -270,6 +276,7 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
       sessionPeaks = emptyPeaks();
       lastEngineMetrics = {};
       lastMetricsTime = 0;
+      recentTtftMs = 0;
       bumpPeak(sessionPeaks, "power_watts", totalPowerWatts);
       bumpPeak(sessionPeaks, "vram_used_gb", totalVramUsedGb);
       yield* context.eventManager.publishMetrics({

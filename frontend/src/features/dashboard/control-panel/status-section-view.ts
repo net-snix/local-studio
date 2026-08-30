@@ -32,16 +32,12 @@ type PeakTier = "session" | "bestSession" | "all";
 
 const PEAK_FIELDS: Record<PeakKind, Record<PeakTier, readonly (keyof Metrics)[]>> = {
   generation: {
-    session: [
-      "session_peak_generation_tps",
-      "session_peak_generation_throughput",
-      "session_peak_generation",
-    ],
+    session: ["session_peak_generation_tps", "session_peak_generation_throughput"],
     bestSession: ["best_session_generation_tps", "session_peak_generation_tps"],
     all: ["peak_generation_tps"],
   },
   prefill: {
-    session: ["session_peak_prefill_tps", "session_peak_prompt_throughput", "session_peak_prefill"],
+    session: ["session_peak_prefill_tps", "session_peak_prompt_throughput"],
     bestSession: ["best_session_prefill_tps", "session_peak_prefill_tps"],
     all: ["peak_prefill_tps"],
   },
@@ -124,9 +120,9 @@ function resolveModelSampleKey(
 function resolvePerformanceMetrics(metrics: Metrics | null, gpus: GPU[]) {
   const gpuTotals = resolveGpuTotals(gpus);
   return {
-    genTps: firstPositive(metrics?.generation_throughput, metrics?.session_avg_generation),
-    prefillTps: firstPositive(metrics?.prompt_throughput, metrics?.session_avg_prefill),
-    ttftMs: firstPositive(metrics?.avg_ttft_ms),
+    genTps: firstPositive(metrics?.generation_throughput),
+    prefillTps: firstPositive(metrics?.prompt_throughput),
+    ttftMs: firstPositive(metrics?.recent_ttft_ms, metrics?.avg_ttft_ms),
     sessions: metrics?.running_requests ?? 0,
     peakReq: metrics?.session_peak_running_requests ?? 0,
     totalMemUsed: firstPositive(gpuTotals.memUsed, metrics?.vram_used_gb),
@@ -168,7 +164,7 @@ function metricColumnViews(
     {
       label: "Prefill",
       value: metricValue(perf.prefillTps, 1),
-      unit: "t/s",
+      unit: "tok/s",
       ...peakDetailFor(metrics, "prefill"),
     },
   ];

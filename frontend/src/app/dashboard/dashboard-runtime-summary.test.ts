@@ -68,4 +68,34 @@ describe("dashboard runtime summary", () => {
     assert.equal(summary.prefill, "73997.7");
     assert.equal(summary.ttft, "287");
   });
+
+  test("prefers the recent interval TTFT over the engine-lifetime average", () => {
+    const summary = buildRuntimeSummary(
+      statusData({
+        metrics: {
+          model_id: "glm-5.3-flash",
+          recent_ttft_ms: 412.4,
+          avg_ttft_ms: 605.9,
+        },
+      }),
+    );
+
+    assert.equal(summary.ttft, "412");
+  });
+
+  test("labels the stored lowest TTFT as best, not peak", () => {
+    const summary = buildRuntimeSummary(
+      statusData({
+        metrics: {
+          model_id: "glm-5.3-flash",
+          avg_ttft_ms: 605.9,
+          session_peak_ttft_ms: 143.2,
+          session_peak_generation_throughput: 151.9,
+        },
+      }),
+    );
+
+    assert.equal(summary.ttftPeak, "best 143 ms");
+    assert.equal(summary.decodePeak, "peak 151.9");
+  });
 });

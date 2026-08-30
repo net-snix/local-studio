@@ -24,34 +24,30 @@ export function buildRuntimeSummary(statusData: DashboardLayoutProps) {
 
   const decode = firstPositive(
     metrics?.generation_throughput,
-    metrics?.session_avg_generation,
     metrics?.session_peak_generation_throughput,
-    metrics?.session_peak_generation,
     metrics?.peak_generation_tps,
   );
   const prefill = firstPositive(
     metrics?.prompt_throughput,
-    metrics?.session_avg_prefill,
     metrics?.session_peak_prompt_throughput,
-    metrics?.session_peak_prefill,
     metrics?.peak_prefill_tps,
   );
   const ttft = firstPositive(
+    metrics?.recent_ttft_ms,
     metrics?.avg_ttft_ms,
     metrics?.session_peak_ttft_ms,
     metrics?.peak_ttft_ms,
   );
   const decodePeak = firstPositive(
     metrics?.session_peak_generation_throughput,
-    metrics?.session_peak_generation,
     metrics?.peak_generation_tps,
   );
   const prefillPeak = firstPositive(
     metrics?.session_peak_prompt_throughput,
-    metrics?.session_peak_prefill,
     metrics?.peak_prefill_tps,
   );
-  const ttftPeak = firstPositive(metrics?.session_peak_ttft_ms, metrics?.peak_ttft_ms);
+  // session_peak_ttft_ms / peak_ttft_ms store the session/all-time BEST (lowest) TTFT.
+  const ttftBest = firstPositive(metrics?.session_peak_ttft_ms, metrics?.peak_ttft_ms);
   const totalPower = firstPositive(metrics?.current_power_watts, fallbackPower);
   const powerLimit = firstPositive(metrics?.power_limit_watts, fallbackPowerLimit);
   const vramUsed = firstPositive(metrics?.vram_used_gb, fallbackVramUsed);
@@ -70,7 +66,7 @@ export function buildRuntimeSummary(statusData: DashboardLayoutProps) {
     ttft: formatNumberMetric(ttft, 0),
     prefill: formatNumberMetric(prefill, 1),
     decodePeak: formatPeak(decodePeak, 1),
-    ttftPeak: formatPeak(ttftPeak, 0, " ms"),
+    ttftPeak: formatPeak(ttftBest, 0, " ms", "best"),
     prefillPeak: formatPeak(prefillPeak, 1),
     requests: `${runningRequests}/${peakRequests}`,
     vram: formatRatio(vramUsed, vramTotal, "G", 1),
@@ -103,9 +99,14 @@ function formatNumberMetric(value: number | null, digits: number): string | null
     : null;
 }
 
-function formatPeak(value: number | null, digits: number, suffix = ""): string | undefined {
+function formatPeak(
+  value: number | null,
+  digits: number,
+  suffix = "",
+  label = "peak",
+): string | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? `peak ${value.toFixed(digits)}${suffix}`
+    ? `${label} ${value.toFixed(digits)}${suffix}`
     : undefined;
 }
 

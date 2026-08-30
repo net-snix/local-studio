@@ -40,6 +40,7 @@ export class EventManager {
   >();
   private readonly channelsLock = Semaphore.makeUnsafe(1);
   private latestMetrics: Record<string, unknown> = {};
+  private latestMetricsAt = 0;
 
   private acquireChannel(
     channel: string,
@@ -108,11 +109,16 @@ export class EventManager {
   public publishMetrics(metricsData: Record<string, unknown>): Effect.Effect<void> {
     return Effect.sync(() => {
       this.latestMetrics = { ...metricsData };
+      this.latestMetricsAt = Date.now();
     }).pipe(Effect.andThen(this.publish(new Event(CONTROLLER_EVENTS.METRICS, metricsData))));
   }
 
   public getLatestMetrics(): Record<string, unknown> {
     return { ...this.latestMetrics };
+  }
+
+  public latestMetricsAgeMs(): number {
+    return this.latestMetricsAt > 0 ? Date.now() - this.latestMetricsAt : Number.POSITIVE_INFINITY;
   }
 
   public publishRuntimeSummary(summaryData: Record<string, unknown>): Effect.Effect<void> {

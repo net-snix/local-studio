@@ -31,6 +31,7 @@ export interface Metrics {
   gpu_utilization?: number;
   memory_used?: number;
   avg_ttft_ms?: number;
+  recent_ttft_ms?: number;
   kv_cache_usage?: number;
   generation_throughput?: number;
   prompt_throughput?: number;
@@ -43,12 +44,7 @@ export interface Metrics {
   vram_used_gb?: number;
   vram_capacity_gb?: number;
   power_limit_watts?: number;
-  // Session averages (since first token this session)
-  session_avg_prefill?: number;
-  session_avg_generation?: number;
   // Session peaks (best this session) — reset on model switch
-  session_peak_prefill?: number;
-  session_peak_generation?: number;
   session_peak_prompt_throughput?: number;
   session_peak_generation_throughput?: number;
   session_peak_ttft_ms?: number;
