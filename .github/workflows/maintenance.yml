@@ -63,8 +63,20 @@ jobs:
             gh pr edit "$existing" --title "$title"
             echo "refreshed PR #$existing ($ahead commits)"
           else
-            gh pr create --base main --head dev \
+            set +e
+            create_output=$(gh pr create --base main --head dev \
               --title "$title" \
-              --body "Automated weekly promotion: $ahead commits from dev. Merging runs CI on main and cuts the release."
-            echo "opened new PR ($ahead commits)"
+              --body "Automated weekly promotion: $ahead commits from dev. Merging runs CI on main and cuts the release." 2>&1)
+            create_exit=$?
+            set -e
+            if [ "$create_exit" -eq 0 ]; then
+              echo "$create_output"
+              echo "opened new PR ($ahead commits)"
+            elif printf '%s' "$create_output" | grep -Fq "GitHub Actions is not permitted to create or approve pull requests"; then
+              echo "::warning::Skipping PR creation because repository settings disallow PR creation by GitHub Actions."
+              echo "Set a secret token with PR create scope and use it for GH_TOKEN if this automation must open PRs."
+            else
+              echo "$create_output" >&2
+              exit "$create_exit"
+            fi
           fi
